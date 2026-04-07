@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.5.2] - 2026-04-06
+
+### Changed
+
+- **Paths**: source and destination placeholders show `"user@ip:/path" or "/path"`.
+
+## [1.5.1] - 2026-04-06
+
+### Changed
+
+- **Paths**: source and destination line edits use placeholder examples `user@ip:/mnt/` or `"/mnt"`.
+
+## [1.5.0] - 2026-04-06
+
+### Added
+
+- **Remote source SSH**: **Src. password** inline on the source row when the source is `user@host:/path`, mirroring **Dest. password** for the destination. Rsync’s **`-e`** SSH transport is applied when **either** side is remote (not only the destination). `QProcess` env uses `sshpass` / `SSH_ASKPASS` from the relevant field; if **both** ends are remote, **destination password is preferred** for `SSHPASS` when set, otherwise source (one env var for both hops — use keys if accounts differ).
+
+### Changed
+
+- **Test SSH**: tests the **destination** host when it is remote; otherwise the **source** host when only the source is remote.
+- **Preflight / scan**: local directory checks and **Scan source** apply only to **local** sources; remote source paths skip the local existence check and show an informative message instead of running a tree walk.
+
 ## [1.4.7] - 2026-04-06
 
 ### Fixed

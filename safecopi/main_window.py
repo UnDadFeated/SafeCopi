@@ -97,8 +97,8 @@ class MainWindow(QWidget):
             pe.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pe.setMinimumHeight(28)
             pe.setClearButtonEnabled(True)
-        self._source.setPlaceholderText("Local folder (dir/ copies contents; dir copies the folder)")
-        self._dest.setPlaceholderText("Local folder or remote user@host:/path")
+        self._source.setPlaceholderText('"user@ip:/path" or "/path"')
+        self._dest.setPlaceholderText('"user@ip:/path" or "/path"')
         self._timeout = QSpinBox()
         self._timeout.setRange(10, 86400)
         self._timeout.setValue(60)
@@ -130,13 +130,21 @@ class MainWindow(QWidget):
         self._bg_partial.addButton(self._radio_resume_partial)
         self._bg_partial.addButton(self._radio_redo_partial)
 
+        self._ssh_password_src = QLineEdit()
+        self._ssh_password_src.setEchoMode(QLineEdit.EchoMode.Password)
+        self._ssh_password_src.setPlaceholderText("Optional (remote src)")
+        self._ssh_password_src.setToolTip(
+            "When the source is user@host:/path, optional password for sshpass or SSH_ASKPASS. "
+            "Not saved. Empty if you use SSH keys."
+        )
+
         self._ssh_password = QLineEdit()
         self._ssh_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self._ssh_password.setPlaceholderText("Optional (remote): sshpass or GUI prompt")
+        self._ssh_password.setPlaceholderText("Optional (remote dest)")
         self._ssh_password.setToolTip(
-            "Used when the destination is user@host:/path. With sshpass installed, the password "
-            "is sent via sshpass -e; otherwise SSH_ASKPASS GUI prompts. Not saved to disk. "
-            "Empty + SSH keys = unattended sync."
+            "When the destination is user@host:/path, optional password for sshpass or SSH_ASKPASS. "
+            "Not saved. Empty if you use SSH keys. If both ends are remote, sshpass uses this field "
+            "first when set; otherwise the source password."
         )
 
         self._btn_browse = QPushButton("Browse…")
@@ -151,11 +159,24 @@ class MainWindow(QWidget):
         )
         self._btn_browse_dest.clicked.connect(self._browse_destination)
 
-        self._lbl_ssh_pw = QLabel("SSH password")
+        self._lbl_ssh_pw_src = QLabel("Src. password")
+        self._lbl_ssh_pw_src.setStyleSheet("color: #bac2de;")
+        self._lbl_ssh_pw_src.setToolTip("Password for the remote source host when the source is user@host:/path.")
+        self._ssh_pw_src_wrap = QWidget()
+        _spws = QHBoxLayout(self._ssh_pw_src_wrap)
+        _spws.setContentsMargins(10, 0, 0, 0)
+        _spws.setSpacing(6)
+        _spws.addWidget(self._lbl_ssh_pw_src, 0)
+        _spws.addWidget(self._ssh_password_src, 0)
+        self._ssh_password_src.setMinimumWidth(120)
+        self._ssh_password_src.setMaximumWidth(180)
+        self._ssh_password_src.setMinimumHeight(28)
+        self._ssh_pw_src_wrap.setVisible(False)
+
+        self._lbl_ssh_pw = QLabel("Dest. password")
         self._lbl_ssh_pw.setStyleSheet("color: #bac2de;")
         self._lbl_ssh_pw.setToolTip(
-            "Optional. Used for keyboard-interactive or password auth when the destination "
-            "is remote. Not saved. Leave empty if you use SSH keys."
+            "Password for the remote destination host when the destination is user@host:/path."
         )
         self._ssh_pw_wrap = QWidget()
         _spw = QHBoxLayout(self._ssh_pw_wrap)
@@ -163,8 +184,8 @@ class MainWindow(QWidget):
         _spw.setSpacing(6)
         _spw.addWidget(self._lbl_ssh_pw, 0)
         _spw.addWidget(self._ssh_password, 0)
-        self._ssh_password.setMinimumWidth(128)
-        self._ssh_password.setMaximumWidth(200)
+        self._ssh_password.setMinimumWidth(120)
+        self._ssh_password.setMaximumWidth(180)
         self._ssh_password.setMinimumHeight(28)
         self._ssh_pw_wrap.setVisible(False)
         self._btn_ssh = QPushButton("Test SSH")
@@ -251,6 +272,7 @@ class MainWindow(QWidget):
         row_src.setContentsMargins(0, 0, 0, 0)
         row_src.addWidget(self._source, 1)
         row_src.addWidget(self._btn_browse, 0)
+        row_src.addWidget(self._ssh_pw_src_wrap, 0)
         w_src = QWidget()
         w_src.setLayout(row_src)
         fl.addRow("Source", w_src)
@@ -513,6 +535,7 @@ class MainWindow(QWidget):
     def _wire_settings_persistence(self) -> None:
         for w in (self._source, self._dest, self._extra_rsync):
             w.textChanged.connect(self._debounce_settings_and_preview)
+        self._source.textChanged.connect(self._update_ssh_password_visibility)
         self._dest.textChanged.connect(self._update_ssh_password_visibility)
         self._timeout.valueChanged.connect(self._debounce_settings_and_preview)
         self._retry.valueChanged.connect(self._debounce_settings_and_preview)
@@ -609,15 +632,16 @@ class MainWindow(QWidget):
         if bw > 0:
             args.append(f"--bwlimit={bw}")
         args.extend(self._parsed_user_extra_args())
-        remote, _rpath = self._parsed_destination()
-        if remote is not None:
+        src_remote, _ = self._parsed_source()
+        dst_remote, _rpath = self._parsed_destination()
+        if src_remote is not None or dst_remote is not None:
             args.extend(
                 [
                     "-e",
                     rsync_ssh_e_shell(
                         self._timeout.value(),
                         self._ssh_batch_mode(),
-                        password_for_sshpass=self._ssh_password_for_sshpass(),
+                        password_for_sshpass=self._rsync_sshpass_password(),
                     ),
                 ]
             )
@@ -804,8 +828,8 @@ class MainWindow(QWidget):
 
     @Slot()
     def _update_ssh_password_visibility(self) -> None:
-        show = self._parsed_destination()[0] is not None
-        self._ssh_pw_wrap.setVisible(show)
+        self._ssh_pw_src_wrap.setVisible(self._parsed_source()[0] is not None)
+        self._ssh_pw_wrap.setVisible(self._parsed_destination()[0] is not None)
 
     @Slot(str)
     def _on_scan_phase(self, text: str) -> None:
@@ -888,34 +912,87 @@ class MainWindow(QWidget):
         if t is not None:
             t.quit()
 
+    def _parsed_source(self) -> Tuple[Optional[RemoteTarget], str]:
+        return parse_rsync_destination(self._source.text().strip())
+
     def _parsed_destination(self) -> Tuple[Optional[RemoteTarget], str]:
         return parse_rsync_destination(self._dest.text().strip())
+
+    def _remote_for_source(self) -> Optional[RemoteTarget]:
+        return self._parsed_source()[0]
 
     def _remote_for_dest(self) -> Optional[RemoteTarget]:
         return self._parsed_destination()[0]
 
+    def _ssh_source_is_remote(self) -> bool:
+        return self._parsed_source()[0] is not None
+
     def _ssh_destination_is_remote(self) -> bool:
         return self._parsed_destination()[0] is not None
 
-    def _ssh_batch_mode(self) -> bool:
-        # Remote destinations use password-capable SSH (not BatchMode). Local paths skip SSH.
-        return not self._ssh_destination_is_remote()
+    def _ssh_either_remote(self) -> bool:
+        return self._ssh_source_is_remote() or self._ssh_destination_is_remote()
 
-    def _ssh_password_plain(self) -> str:
+    def _ssh_batch_mode(self) -> bool:
+        # Rsync -e: allow password / kbd-interactive when either side is remote.
+        return not self._ssh_either_remote()
+
+    def _ssh_password_dest_plain(self) -> str:
         return self._ssh_password.text().strip()
 
-    def _ssh_password_for_sshpass(self) -> Optional[str]:
+    def _ssh_password_src_plain(self) -> str:
+        return self._ssh_password_src.text().strip()
+
+    def _dest_sshpass_password(self) -> Optional[str]:
         if not self._ssh_destination_is_remote():
             return None
-        pw = self._ssh_password_plain()
+        pw = self._ssh_password_dest_plain()
         if pw and shutil.which("sshpass"):
             return pw
+        return None
+
+    def _source_sshpass_password(self) -> Optional[str]:
+        if not self._ssh_source_is_remote():
+            return None
+        pw = self._ssh_password_src_plain()
+        if pw and shutil.which("sshpass"):
+            return pw
+        return None
+
+    def _rsync_sshpass_password(self) -> Optional[str]:
+        """
+        Password passed to sshpass for rsync's single -e transport.
+
+        If both source and destination are remote, destination field is preferred when set,
+        otherwise source (same SSHPASS for both hops — use keys if passwords differ).
+        """
+        if not shutil.which("sshpass"):
+            return None
+        dp = self._dest_sshpass_password()
+        sp = self._source_sshpass_password()
+        if self._ssh_destination_is_remote() and self._ssh_source_is_remote():
+            return dp or sp
+        if self._ssh_destination_is_remote():
+            return dp
+        if self._ssh_source_is_remote():
+            return sp
         return None
 
     def _ssh_extra_env(self) -> Optional[Dict[str, str]]:
         if not self._ssh_destination_is_remote():
             return None
-        if self._ssh_password_for_sshpass():
+        if self._dest_sshpass_password():
+            return None
+        w = ensure_ssh_askpass_wrapper()
+        return {
+            "SSH_ASKPASS": str(w),
+            "SSH_ASKPASS_REQUIRE": "force",
+        }
+
+    def _source_ssh_extra_env(self) -> Optional[Dict[str, str]]:
+        if not self._ssh_source_is_remote():
+            return None
+        if self._source_sshpass_password():
             return None
         w = ensure_ssh_askpass_wrapper()
         return {
@@ -925,12 +1002,14 @@ class MainWindow(QWidget):
 
     def _ssh_qprocess_env(self) -> QProcessEnvironment:
         env = QProcessEnvironment.systemEnvironment()
-        pw = self._ssh_password_plain()
-        if self._ssh_destination_is_remote() and pw and shutil.which("sshpass"):
-            env.insert("SSHPASS", pw)
+        secret = self._rsync_sshpass_password()
+        src_r = self._ssh_source_is_remote()
+        dst_r = self._ssh_destination_is_remote()
+        if (src_r or dst_r) and secret:
+            env.insert("SSHPASS", secret)
             env.remove("SSH_ASKPASS")
             env.remove("SSH_ASKPASS_REQUIRE")
-        elif self._ssh_destination_is_remote():
+        elif src_r or dst_r:
             w = ensure_ssh_askpass_wrapper()
             env.insert("SSH_ASKPASS", str(w))
             env.insert("SSH_ASKPASS_REQUIRE", "force")
@@ -943,16 +1022,28 @@ class MainWindow(QWidget):
 
     @Slot()
     def _test_ssh(self) -> None:
-        remote = self._remote_for_dest()
-        if remote is None:
+        dest_remote = self._remote_for_dest()
+        src_remote = self._remote_for_source()
+        if dest_remote is not None:
+            remote = dest_remote
+            role = "destination"
+            pw = self._ssh_password_dest_plain()
+            extra_env = self._ssh_extra_env()
+            pw_sshpass = self._dest_sshpass_password()
+        elif src_remote is not None:
+            remote = src_remote
+            role = "source"
+            pw = self._ssh_password_src_plain()
+            extra_env = self._source_ssh_extra_env()
+            pw_sshpass = self._source_sshpass_password()
+        else:
             QMessageBox.information(
                 self,
                 "SSH test",
-                "Destination looks local. SSH test applies to user@host:/path destinations.",
+                "SSH applies when the source or destination is user@host:/path.",
             )
             return
-        self._append_log(f"SSH: testing {remote.ssh_spec()} …")
-        pw = self._ssh_password_plain()
+        self._append_log(f"SSH: testing {remote.ssh_spec()} ({role}) …")
         if pw and not shutil.which("sshpass"):
             self._append_log(
                 "Note: sshpass not found — password field ignored; using GUI prompts. "
@@ -975,8 +1066,8 @@ class MainWindow(QWidget):
                 "echo ok",
                 connect_timeout=12,
                 batch_mode=self._ssh_batch_mode(),
-                extra_env=self._ssh_extra_env(),
-                password_for_sshpass=self._ssh_password_for_sshpass(),
+                extra_env=extra_env,
+                password_for_sshpass=pw_sshpass,
             )
             out = (proc.stdout or "").strip()
             if proc.returncode == 0 and "ok" in out:
@@ -1024,7 +1115,7 @@ class MainWindow(QWidget):
                 rpath,
                 batch_mode=self._ssh_batch_mode(),
                 extra_env=self._ssh_extra_env(),
-                password_for_sshpass=self._ssh_password_for_sshpass(),
+                password_for_sshpass=self._dest_sshpass_password(),
                 connect_timeout=min(max(10, self._timeout.value()), 120),
             )
             self._dest_free_bytes = free
@@ -1044,6 +1135,14 @@ class MainWindow(QWidget):
     @Slot()
     def _scan_source(self) -> None:
         path = self._source.text().strip()
+        if self._parsed_source()[0] is not None:
+            QMessageBox.information(
+                self,
+                "Scan",
+                "Source scan only supports local directories. "
+                "Remote sources (user@host:/path) are not walked from this app.",
+            )
+            return
         p = Path(path).expanduser()
         if not p.is_dir():
             QMessageBox.warning(self, "Scan", "Source must be an existing local directory.")
@@ -1085,10 +1184,11 @@ class MainWindow(QWidget):
 
     def _preflight_warnings(self) -> bool:
         """Return True if user accepts or no blocking issue."""
-        src = Path(self._source.text().strip()).expanduser()
-        if not src.is_dir():
-            QMessageBox.warning(self, "Sync", "Source directory does not exist.")
-            return False
+        if self._parsed_source()[0] is None:
+            src = Path(self._source.text().strip()).expanduser()
+            if not src.is_dir():
+                QMessageBox.warning(self, "Sync", "Source directory does not exist.")
+                return False
 
         if self._dry_run.isChecked():
             return True

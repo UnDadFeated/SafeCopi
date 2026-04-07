@@ -7,6 +7,7 @@ from safecopi.utils import (
     parse_rsync_progress2_line,
     parse_rsync_transferred_amount_token,
     parse_rsync_transfer_progress_line,
+    parse_rsync_xfr_count,
     should_log_rsync_stderr_line,
 )
 
@@ -81,6 +82,12 @@ def test_humanize_ir_chk() -> None:
     h = humanize_rsync_progress_stats("xfr#0, ir-chk=1000/2855")
     assert "Transfer progress #0" in h
     assert "2,855" in h
+
+
+def test_parse_rsync_xfr_count() -> None:
+    assert parse_rsync_xfr_count("xfr#42, to-chk=1/10") == 42
+    assert parse_rsync_xfr_count("") is None
+    assert parse_rsync_xfr_count("to-chk=1/10") is None
 
 
 def test_parse_rsync_transferred_amount_token() -> None:

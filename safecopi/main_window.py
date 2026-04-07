@@ -41,6 +41,7 @@ from safecopi.utils import (
     local_free_bytes,
     parse_extra_rsync_args,
     parse_rsync_destination,
+    parse_rsync_xfr_count,
     remote_df_free_bytes,
     rsync_ssh_e_shell,
     run_ssh_command,
@@ -587,7 +588,9 @@ class MainWindow(QWidget):
         self._sync_progress_timer.stop()
         self._pending_sync_snap = None
         self._sync_attempt_shown = 1
+        self._progress.setRange(0, 100)
         self._progress.setValue(0)
+        self._progress.setFormat("%p%")
         self._lbl_sync_headline.setText("Idle — no transfer running.")
         self._lbl_sync_detail.setText(
             "Live: bytes sent (when rsync reports them), job %, throughput, ETA, elapsed time, "
@@ -598,39 +601,85 @@ class MainWindow(QWidget):
     def _sync_panel_starting(self) -> None:
         self._sync_progress_timer.stop()
         self._pending_sync_snap = None
+        self._progress.setRange(0, 10_000)
         self._progress.setValue(0)
+        self._progress.setFormat("Starting rsync…")
         self._sync_attempt_shown = 1
         self._lbl_sync_headline.setText("Starting rsync…")
         self._lbl_sync_detail.setText(
             "Waiting for the first progress line (can take a few seconds over SSH)."
         )
 
-    @Slot()
-    def _flush_sync_transfer_ui(self) -> None:
-        snap = self._pending_sync_snap
-        if snap is None:
-            return
-        rsync_pct = max(0, min(100, snap.percent))
-        bar_pct = rsync_pct
+    def _sync_transfer_bar_units(self, snap: RsyncProgressSnapshot) -> int:
+        """
+        Map transfer state to 0..10000 for the bar (finer than integer percent on huge trees).
+
+        Uses rsync's reported percent, bytes sent vs last scan size, and xfr# vs last scan file count.
+        """
+        rsync_u = min(10_000, max(0, snap.percent * 100))
         scan_b = self._last_scan[1]
+        scan_n = self._last_scan[0]
+        byte_u = 0
         if (
             snap.transferred_bytes is not None
             and scan_b is not None
             and scan_b > 0
             and snap.transferred_bytes >= 0
         ):
-            est = int(min(99, max(0, 100 * snap.transferred_bytes / scan_b)))
-            bar_pct = max(rsync_pct, est)
-        self._progress.setValue(bar_pct)
+            byte_u = min(10_000, int(10_000 * snap.transferred_bytes / scan_b))
+        xfr_u = 0
+        xf = parse_rsync_xfr_count(snap.stats_raw)
+        if xf is not None and scan_n is not None and scan_n > 0:
+            xfr_u = min(10_000, int(10_000 * xf / scan_n))
+        return min(10_000, max(rsync_u, byte_u, xfr_u))
+
+    @Slot()
+    def _flush_sync_transfer_ui(self) -> None:
+        snap = self._pending_sync_snap
+        if snap is None:
+            return
+        if self._progress.maximum() != 10_000:
+            self._progress.setRange(0, 10_000)
+        bar_u = self._sync_transfer_bar_units(snap)
+        self._progress.setValue(bar_u)
         eta_disp = snap.eta
         if snap.percent >= 99 and snap.eta.strip() == "0:00:00":
             eta_disp = "finishing…"
+        scan_b = self._last_scan[1]
+        scan_n = self._last_scan[0]
+        pct_bytes = (
+            (100.0 * snap.transferred_bytes / scan_b)
+            if (
+                snap.transferred_bytes is not None
+                and scan_b is not None
+                and scan_b > 0
+            )
+            else 0.0
+        )
+        xf = parse_rsync_xfr_count(snap.stats_raw)
+        pct_files = (
+            (100.0 * xf / scan_n)
+            if (xf is not None and scan_n is not None and scan_n > 0)
+            else 0.0
+        )
+        pct_disp = min(100.0, max(float(snap.percent), pct_bytes, pct_files))
+        # Qt treats "%%" as a literal "%" in setFormat; build two ASCII percent signs in Python.
+        fmt_bits: List[str] = [f"{pct_disp:.2f}" + "%%"]
+        if snap.transferred_display:
+            fmt_bits.append(f"{snap.transferred_display} sent")
+        elif snap.transferred_bytes is not None:
+            fmt_bits.append(f"{human_bytes(snap.transferred_bytes)} sent")
+        if scan_b is not None and scan_b > 0:
+            fmt_bits.append(f"of {human_bytes(scan_b)} scanned")
+        fmt_bits.append(snap.speed)
+        fmt_bits.append(f"ETA {eta_disp}")
+        self._progress.setFormat(" · ".join(fmt_bits))
         head_bits: List[str] = []
         if snap.transferred_display:
             head_bits.append(f"{snap.transferred_display} sent")
         elif snap.transferred_bytes is not None:
             head_bits.append(f"{human_bytes(snap.transferred_bytes)} sent")
-        head_bits.append(f"{snap.percent}% complete")
+        head_bits.append(f"{pct_disp:.2f}% complete")
         head_bits.append(snap.speed)
         head_bits.append(f"ETA {eta_disp}")
         self._lbl_sync_headline.setText(" · ".join(head_bits))
@@ -1038,7 +1087,9 @@ class MainWindow(QWidget):
         if ok:
             self._sync_progress_timer.stop()
             self._pending_sync_snap = None
-            self._progress.setValue(100)
+            self._progress.setRange(0, 10_000)
+            self._progress.setValue(10_000)
+            self._progress.setFormat("100.00" + "%%" + " · complete")
             self._lbl_sync_headline.setText(
                 "Dry run finished." if was_dry else "Transfer finished successfully."
             )
@@ -1055,7 +1106,9 @@ class MainWindow(QWidget):
         else:
             self._sync_progress_timer.stop()
             self._pending_sync_snap = None
+            self._progress.setRange(0, 100)
             self._progress.setValue(0)
+            self._progress.setFormat("%p%")
             self._lbl_sync_headline.setText(f"Stopped or failed (exit code {code}).")
             self._lbl_sync_detail.setText(
                 "Check the log for details. The worker may retry until you press Stop."
@@ -1070,7 +1123,9 @@ class MainWindow(QWidget):
         self._btn_stop.setEnabled(False)
         self._sync_progress_timer.stop()
         self._pending_sync_snap = None
+        self._progress.setRange(0, 100)
         self._progress.setValue(0)
+        self._progress.setFormat("%p%")
         self._lbl_sync_headline.setText("Stopped by user.")
         self._lbl_sync_detail.setText("")
 

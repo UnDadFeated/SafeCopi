@@ -482,6 +482,14 @@ def _format_rsync_count_ratio(chunk: str) -> str:
         return chunk
 
 
+def parse_rsync_xfr_count(stats_raw: str) -> Optional[int]:
+    """Return the ``xfr#N`` counter from rsync progress parenthetical stats, if present."""
+    if not stats_raw or not stats_raw.strip():
+        return None
+    m = re.search(r"(?i)xfr#(\d+)", stats_raw)
+    return int(m.group(1)) if m else None
+
+
 def humanize_rsync_progress_stats(paren_inner: str) -> str:
     """Turn parenthetical rsync progress fragments into short, readable phrases."""
     if not paren_inner or not paren_inner.strip():

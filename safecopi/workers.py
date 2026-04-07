@@ -114,6 +114,8 @@ class RsyncWorker(QObject):
         self._extra_args: List[str] = []
         self._recursive: bool = True
         self._env: Optional[QProcessEnvironment] = None
+        self._stdout_linebuf: str = ""
+        self._stderr_linebuf: str = ""
 
     def is_syncing(self) -> bool:
         return self._sync_active
@@ -191,6 +193,8 @@ class RsyncWorker(QObject):
         self.log_line.emit(
             f"[Attempt {self._attempt}] rsync → {self._dest} (timeout={self._timeout_sec}s)"
         )
+        self._stdout_linebuf = ""
+        self._stderr_linebuf = ""
 
         if self._process is not None:
             old = self._process
@@ -235,30 +239,52 @@ class RsyncWorker(QObject):
             self._sync_active = False
             self.sync_finished.emit(-1, False)
 
+    def _normalize_stream_text(self, data: bytes) -> str:
+        """Decode and normalize newlines (rsync may use \\r on a pseudo-TTY path)."""
+        return (
+            data.decode("utf-8", errors="replace")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
+
+    def _feed_line_buffer(self, buf_attr: str, chunk: str) -> None:
+        merged = getattr(self, buf_attr) + chunk
+        lines = merged.split("\n")
+        setattr(self, buf_attr, lines[-1])
+        for line in lines[:-1]:
+            self._handle_rsync_io_line(line.rstrip())
+
+    def _handle_rsync_io_line(self, line: str) -> None:
+        """Progress lines update the transfer UI only; everything else is filter-logged."""
+        if not line:
+            return
+        snap = parse_rsync_transfer_progress_line(line)
+        if snap is not None:
+            self.progress.emit(snap)
+        elif should_log_rsync_stderr_line(line):
+            self.log_line.emit(line)
+
+    def _flush_io_line_buffers(self) -> None:
+        for attr in ("_stdout_linebuf", "_stderr_linebuf"):
+            rest = getattr(self, attr)
+            if rest.strip():
+                self._handle_rsync_io_line(rest.rstrip())
+            setattr(self, attr, "")
+
     def _on_stdout(self) -> None:
         if not self._process:
             return
-        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        for line in data.splitlines():
-            line = line.rstrip()
-            if line:
-                self.log_line.emit(line)
+        data = bytes(self._process.readAllStandardOutput())
+        self._feed_line_buffer("_stdout_linebuf", self._normalize_stream_text(data))
 
     def _on_stderr(self) -> None:
         if not self._process:
             return
-        data = bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
-        for line in data.splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-            snap = parse_rsync_transfer_progress_line(line)
-            if snap is not None:
-                self.progress.emit(snap)
-            elif should_log_rsync_stderr_line(line):
-                self.log_line.emit(line)
+        data = bytes(self._process.readAllStandardError())
+        self._feed_line_buffer("_stderr_linebuf", self._normalize_stream_text(data))
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+        self._flush_io_line_buffers()
         proc = self._process
         self._process = None
         if proc is not None:

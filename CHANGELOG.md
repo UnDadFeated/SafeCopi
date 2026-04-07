@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.4] - 2026-04-06
+
+### Fixed
+
+- **Activity log flood**: rsync **stdout** is filtered like stderr—transfer progress lines are parsed for the transfer panel only and are no longer appended to the log. Incomplete writes are accumulated in line buffers until a newline (with `\r` normalized) so progress lines are not misclassified as plain text.
+
+### Changed
+
+- **Transfer progress bar**: uses an internal **0..10000** scale so sub‑percent motion is visible on multi‑tebibyte trees; **bar label** (`setFormat`) shows **two decimal %**, bytes sent, scanned total (when a source scan exists), **speed**, and **ETA**. Progress uses the maximum of rsync’s %, **bytes sent / scanned size**, and **`xfr#` / scanned file count** when those numbers are available (`parse_rsync_xfr_count()` in `utils`).
+
 ## [1.4.3] - 2026-04-06
 
 ### Changed

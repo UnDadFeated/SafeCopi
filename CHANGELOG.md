@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.4] - 2026-04-06
+
+### Changed
+
+- **Sync session**: while a transfer is active (including retry waits), **Source** / **Destination** fields, **Browse**, **Src.** / **Dest.** password, **Rsync** options (timeouts, dry run, recursion, partial mode, BW limit, extra args), **Test SSH**, **Dest. space**, and **Scan source** are disabled. **Stop scan** is unchanged if a scan was already running. Controls restore when the sync finishes, fails out, or is stopped.
+
 ## [1.5.3] - 2026-04-06
 
 ### Changed

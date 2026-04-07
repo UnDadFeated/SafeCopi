@@ -1184,6 +1184,35 @@ class MainWindow(QWidget):
     def _extra_rsync_args(self) -> List[str]:
         return self._collect_rsync_modifiers()
 
+    def _set_path_and_rsync_controls_enabled(self, enabled: bool) -> None:
+        """Paths, rsync options, and preflight actions — disabled for the duration of a sync."""
+        for w in (
+            self._source,
+            self._dest,
+            self._ssh_password_src,
+            self._ssh_password,
+            self._btn_browse,
+            self._btn_browse_dest,
+            self._timeout,
+            self._retry,
+            self._dry_run,
+            self._recursive_subdirs,
+            self._radio_resume_partial,
+            self._radio_redo_partial,
+            self._bwlimit,
+            self._extra_rsync,
+            self._btn_ssh,
+            self._btn_space,
+            self._btn_scan,
+        ):
+            w.setEnabled(enabled)
+        if enabled:
+            scan_running = (
+                self._scan_thread is not None and self._scan_thread.isRunning()
+            )
+            self._btn_scan.setEnabled(not scan_running)
+            self._btn_stop_scan.setEnabled(scan_running)
+
     def _preflight_warnings(self) -> bool:
         """Return True if user accepts or no blocking issue."""
         if self._parsed_source()[0] is None:
@@ -1249,6 +1278,7 @@ class MainWindow(QWidget):
         self._last_sync_was_dry_run = self._dry_run.isChecked()
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        self._set_path_and_rsync_controls_enabled(False)
         self._sync_panel_starting()
 
         try:
@@ -1263,6 +1293,7 @@ class MainWindow(QWidget):
             )
             self._rsync.start_sync_loop()
         except OSError as e:
+            self._set_path_and_rsync_controls_enabled(True)
             self._btn_start.setEnabled(True)
             self._btn_stop.setEnabled(False)
             self._reset_sync_transfer_panel()
@@ -1284,6 +1315,7 @@ class MainWindow(QWidget):
         self._last_sync_was_dry_run = False
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._set_path_and_rsync_controls_enabled(True)
         if ok:
             self._sync_progress_timer.stop()
             self._stop_sync_session_wall_clock(reset_label=False)
@@ -1323,6 +1355,7 @@ class MainWindow(QWidget):
         self._last_sync_was_dry_run = False
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._set_path_and_rsync_controls_enabled(True)
         self._sync_progress_timer.stop()
         self._stop_sync_session_wall_clock(reset_label=False)
         self._pending_sync_snap = None

@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Run SafeCopi with the project venv (no shell activation needed).
+set -e
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$ROOT/.venv/bin/python" -m safecopi "$@"

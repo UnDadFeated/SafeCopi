@@ -1,0 +1,3 @@
+# Install with the venv pip only, e.g. .venv/bin/pip install -r requirements.txt
+# Fish shell: never "source .venv/bin/activate" (bash script). Use .venv/bin/python or ./bootstrap
+PySide6>=6.6.0,<7

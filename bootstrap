@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# Create .venv and install deps. Does not use "activate" (safe for fish, zsh, bash).
+set -e
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$ROOT"
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || PY=python
+"$PY" -m venv .venv
+.venv/bin/pip install -q -U pip
+.venv/bin/pip install -q -r requirements.txt
+printf '\nDone. Start the app (copy-paste):\n  %s/.venv/bin/python -m safecopi\nor:\n  %s/run-safecopi\n' "$ROOT" "$ROOT"

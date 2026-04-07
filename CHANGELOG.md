@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3] - 2026-04-06
+
+### Changed
+
+- **Progress UI**: ETA and rsync **elapsed** times use stable **`HH:MM:SS`**-style labels (zero-padded minutes and seconds; hours padded to two digits below 100h, then natural width for longer runs). **Session elapsed** under the bar uses the same pattern instead of `M:SS` under one hour.
+- **Sizes**: **`human_bytes`** and scan/space labels use **decimal SI** units (**KB**, **MB**, **GB**, **TB**) instead of binary KiB/MiB/GiB/TiB. The transfer bar prefers parsed byte totals so **sent** matches (**GB** with a **B**, not rsync’s bare `G`).
+
 ## [1.5.2] - 2026-04-06
 
 ### Changed

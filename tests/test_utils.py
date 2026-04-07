@@ -2,6 +2,8 @@
 
 from safecopi.utils import (
     build_rsync_command_argv,
+    format_rsync_hms_for_display,
+    human_bytes,
     humanize_rsync_progress_stats,
     parse_extra_rsync_args,
     parse_rsync_progress2_line,
@@ -120,6 +122,20 @@ def test_parse_rsync_transfer_progress_line_prefers_progress2() -> None:
     assert s.elapsed == "0:00:01"
     assert s.transferred_bytes is None
     assert s.transferred_display is None
+
+
+def test_format_rsync_hms_for_display() -> None:
+    assert format_rsync_hms_for_display("0:08:28") == "00:08:28"
+    assert format_rsync_hms_for_display("71:36:26") == "71:36:26"
+    assert format_rsync_hms_for_display("102:05:03") == "102:05:03"
+    assert format_rsync_hms_for_display("—") == "—"
+
+
+def test_human_bytes_si() -> None:
+    assert human_bytes(500) == "500 B"
+    assert human_bytes(1500).startswith("1.50 KB")
+    assert "GB" in human_bytes(5_747_000_000)
+    assert "TB" in human_bytes(3 * 10**12)
 
 
 def test_should_log_rsync_stderr_line() -> None:

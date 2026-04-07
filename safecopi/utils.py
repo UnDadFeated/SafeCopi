@@ -373,16 +373,45 @@ def count_files_local(
 
 
 def human_bytes(n: Optional[int]) -> str:
+    """Format byte counts using decimal (SI) steps: B, KB, MB, GB, TB, PB."""
     if n is None:
         return "—"
-    x = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
-        if abs(x) < 1024.0 or unit == "PiB":
+    x = float(abs(n))
+    neg = n < 0
+    prefix = "-" if neg else ""
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if x < 1000.0 or unit == "PB":
             if unit == "B":
-                return f"{int(x)} B"
-            return f"{x:.2f} {unit}"
-        x /= 1024.0
-    return f"{x:.2f} PiB"
+                return f"{prefix}{int(x)} B"
+            return f"{prefix}{x:.2f} {unit}"
+        x /= 1000.0
+    return f"{prefix}{x:.2f} PB"
+
+
+def format_rsync_hms_for_display(s: str) -> str:
+    """
+    Normalize rsync ``H:M:S`` time tokens for stable UI width.
+
+    Minutes and seconds are always two digits. Hours are zero-padded to two digits when below
+    100 so ``0:08:28`` becomes ``00:08:28``; at 100+ hours the hour field uses as many digits as
+    needed (e.g. ``71:36:26``, ``102:05:03``).
+    """
+    t = s.strip()
+    if not t or t == "—":
+        return s
+    parts = t.split(":")
+    if len(parts) != 3:
+        return s
+    try:
+        h, mi, se = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return s
+    h = max(0, h)
+    mi = max(0, min(mi, 59))
+    se = max(0, min(se, 59))
+    if h < 100:
+        return f"{h:02d}:{mi:02d}:{se:02d}"
+    return f"{h}:{mi:02d}:{se:02d}"
 
 
 def parse_extra_rsync_args(line: str) -> List[str]:

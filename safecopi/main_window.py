@@ -46,6 +46,7 @@ from safecopi.utils import (
     RsyncProgressSnapshot,
     build_rsync_command_argv,
     ensure_ssh_askpass_wrapper,
+    format_rsync_hms_for_display,
     human_bytes,
     local_free_bytes,
     parse_extra_rsync_args,
@@ -717,9 +718,9 @@ class MainWindow(QWidget):
         sec = ms // 1000
         h, r = divmod(sec, 3600)
         m, s = divmod(r, 60)
-        if h:
-            return f"{h:d}:{m:02d}:{s:02d}"
-        return f"{m:d}:{s:02d}"
+        if h < 100:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{h}:{m:02d}:{s:02d}"
 
     def _stop_sync_session_wall_clock(self, *, reset_label: bool = False) -> None:
         self._sync_session_wall_timer.stop()
@@ -768,8 +769,9 @@ class MainWindow(QWidget):
             return
         if self._progress.maximum() != 10_000:
             self._progress.setRange(0, 10_000)
-        eta_disp = snap.eta
-        if snap.percent >= 99 and snap.eta.strip() == "0:00:00":
+        eta_norm = format_rsync_hms_for_display(snap.eta)
+        eta_disp = eta_norm
+        if snap.percent >= 99 and eta_norm == "00:00:00":
             eta_disp = "finishing…"
         scan_b = self._last_scan[1]
         raw_u = self._sync_transfer_bar_units(snap)
@@ -779,16 +781,16 @@ class MainWindow(QWidget):
         # Single U+0025 so Qt does not interpret "%%" as two visible percent signs on all styles.
         _pct = "\u0025"
         fmt_bits: List[str] = [f"{pct_bar:.2f}{_pct}"]
-        if snap.transferred_display:
-            fmt_bits.append(f"{snap.transferred_display} sent")
-        elif snap.transferred_bytes is not None:
+        if snap.transferred_bytes is not None:
             fmt_bits.append(f"{human_bytes(snap.transferred_bytes)} sent")
+        elif snap.transferred_display:
+            fmt_bits.append(f"{snap.transferred_display} sent")
         if scan_b is not None and scan_b > 0:
             fmt_bits.append(f"of {human_bytes(scan_b)} scanned")
         fmt_bits.append(snap.speed)
         fmt_bits.append(f"ETA {eta_disp}")
         self._progress.setFormat(" · ".join(fmt_bits))
-        parts = [f"Elapsed {snap.elapsed}"]
+        parts = [f"Elapsed {format_rsync_hms_for_display(snap.elapsed)}"]
         if snap.transferred_bytes is not None:
             parts.append(human_bytes(snap.transferred_bytes))
         if snap.stats_human:

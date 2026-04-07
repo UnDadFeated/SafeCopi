@@ -5,10 +5,19 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QProcessEnvironment, QSettings, QThread, Qt, QTimer, Slot
+from PySide6.QtCore import (
+    QElapsedTimer,
+    QProcessEnvironment,
+    QSettings,
+    QThread,
+    Qt,
+    QTimer,
+    Slot,
+)
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,7 +50,6 @@ from safecopi.utils import (
     local_free_bytes,
     parse_extra_rsync_args,
     parse_rsync_destination,
-    parse_rsync_xfr_count,
     remote_df_free_bytes,
     rsync_ssh_e_shell,
     run_ssh_command,
@@ -72,12 +80,25 @@ class MainWindow(QWidget):
         self._sync_progress_timer = QTimer(self)
         self._sync_progress_timer.setSingleShot(True)
         self._sync_progress_timer.timeout.connect(self._flush_sync_transfer_ui)
+        self._session_elapsed = QElapsedTimer()
+        self._sync_session_active = False
+        self._sync_session_wall_timer = QTimer(self)
+        self._sync_session_wall_timer.setInterval(500)
+        self._sync_session_wall_timer.timeout.connect(self._update_sync_session_elapsed_label)
         self._pending_sync_snap: Optional[RsyncProgressSnapshot] = None
         self._sync_attempt_shown = 1
+        self._sync_bar_peak: int = 0
         self._rsync = RsyncWorker(self)
 
         self._source = QLineEdit("/mnt/nas/Archive/")
         self._dest = QLineEdit("htpc@192.168.4.112:/mnt/media_hdd/Backup/Archive/")
+        for pe in (self._source, self._dest):
+            pe.setObjectName("PathLineEdit")
+            pe.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            pe.setMinimumHeight(28)
+            pe.setClearButtonEnabled(True)
+        self._source.setPlaceholderText("Local folder (dir/ copies contents; dir copies the folder)")
+        self._dest.setPlaceholderText("Local folder or remote user@host:/path")
         self._timeout = QSpinBox()
         self._timeout.setRange(10, 86400)
         self._timeout.setValue(60)
@@ -119,7 +140,33 @@ class MainWindow(QWidget):
         )
 
         self._btn_browse = QPushButton("Browse…")
+        self._btn_browse.setMinimumHeight(28)
+        self._btn_browse.setToolTip("Choose a local source directory.")
         self._btn_browse.clicked.connect(self._browse_source)
+        self._btn_browse_dest = QPushButton("Browse…")
+        self._btn_browse_dest.setMinimumHeight(28)
+        self._btn_browse_dest.setToolTip(
+            "Choose a local destination folder. For SSH/rsync remote targets, type "
+            "user@host:/path in the field; choosing a folder here sets a local path instead."
+        )
+        self._btn_browse_dest.clicked.connect(self._browse_destination)
+
+        self._lbl_ssh_pw = QLabel("SSH password")
+        self._lbl_ssh_pw.setStyleSheet("color: #bac2de;")
+        self._lbl_ssh_pw.setToolTip(
+            "Optional. Used for keyboard-interactive or password auth when the destination "
+            "is remote. Not saved. Leave empty if you use SSH keys."
+        )
+        self._ssh_pw_wrap = QWidget()
+        _spw = QHBoxLayout(self._ssh_pw_wrap)
+        _spw.setContentsMargins(10, 0, 0, 0)
+        _spw.setSpacing(6)
+        _spw.addWidget(self._lbl_ssh_pw, 0)
+        _spw.addWidget(self._ssh_password, 0)
+        self._ssh_password.setMinimumWidth(128)
+        self._ssh_password.setMaximumWidth(200)
+        self._ssh_password.setMinimumHeight(28)
+        self._ssh_pw_wrap.setVisible(False)
         self._btn_ssh = QPushButton("Test SSH")
         self._btn_ssh.clicked.connect(self._test_ssh)
         self._btn_space = QPushButton("Dest. space")
@@ -173,19 +220,20 @@ class MainWindow(QWidget):
         self._progress.setFormat("%p%")
         self._progress.setMinimumHeight(26)
 
-        self._lbl_sync_headline = QLabel()
-        self._lbl_sync_headline.setWordWrap(True)
-        f_sync = QFont()
-        f_sync.setPointSize(11)
-        f_sync.setBold(True)
-        self._lbl_sync_headline.setFont(f_sync)
+        self._lbl_sync_elapsed = QLabel("Session elapsed: —")
+        self._lbl_sync_elapsed.setStyleSheet(
+            "color: #a6adc8; font-size: 11px; font-family: monospace;"
+        )
+        self._lbl_sync_elapsed.setToolTip(
+            "Wall time since Start sync was pressed (this run). Independent of rsync’s internal elapsed field."
+        )
 
         self._lbl_sync_detail = QLabel()
         self._lbl_sync_detail.setWordWrap(True)
         self._lbl_sync_detail.setStyleSheet("color: #bac2de; font-size: 11px;")
 
         tlay.addWidget(self._progress)
-        tlay.addWidget(self._lbl_sync_headline)
+        tlay.addWidget(self._lbl_sync_elapsed)
         tlay.addWidget(self._lbl_sync_detail)
 
         self._log = QPlainTextEdit()
@@ -200,13 +248,21 @@ class MainWindow(QWidget):
         self._compact_form(fl)
         row_src = QHBoxLayout()
         row_src.setSpacing(6)
+        row_src.setContentsMargins(0, 0, 0, 0)
         row_src.addWidget(self._source, 1)
-        row_src.addWidget(self._btn_browse)
+        row_src.addWidget(self._btn_browse, 0)
         w_src = QWidget()
         w_src.setLayout(row_src)
         fl.addRow("Source", w_src)
-        fl.addRow("Destination", self._dest)
-        fl.addRow("SSH password", self._ssh_password)
+        row_dest = QHBoxLayout()
+        row_dest.setSpacing(6)
+        row_dest.setContentsMargins(0, 0, 0, 0)
+        row_dest.addWidget(self._dest, 1)
+        row_dest.addWidget(self._btn_browse_dest, 0)
+        row_dest.addWidget(self._ssh_pw_wrap, 0)
+        w_dest = QWidget()
+        w_dest.setLayout(row_dest)
+        fl.addRow("Destination", w_dest)
 
         opts = QGroupBox("Rsync")
         fo = QFormLayout(opts)
@@ -366,6 +422,19 @@ class MainWindow(QWidget):
                 padding: 4px 7px;
                 selection-background-color: #89b4fa;
             }
+            QLineEdit#PathLineEdit {
+                min-height: 28px;
+                padding: 5px 9px;
+                font-family: "JetBrains Mono", "Cascadia Code", "Cascadia Mono", "Fira Code",
+                    Consolas, "Liberation Mono", monospace;
+                font-size: 11px;
+                border: 1px solid #6c7086;
+                background-color: #292c3c;
+            }
+            QLineEdit#PathLineEdit:focus {
+                border: 1px solid #89b4fa;
+                background-color: #313244;
+            }
             QSpinBox {
                 background-color: #313244;
                 border: 1px solid #585b70;
@@ -444,6 +513,7 @@ class MainWindow(QWidget):
     def _wire_settings_persistence(self) -> None:
         for w in (self._source, self._dest, self._extra_rsync):
             w.textChanged.connect(self._debounce_settings_and_preview)
+        self._dest.textChanged.connect(self._update_ssh_password_visibility)
         self._timeout.valueChanged.connect(self._debounce_settings_and_preview)
         self._retry.valueChanged.connect(self._debounce_settings_and_preview)
         self._bwlimit.valueChanged.connect(self._debounce_settings_and_preview)
@@ -509,6 +579,7 @@ class MainWindow(QWidget):
             self._bwlimit.setValue(self._settings_int(s, "bwlimit", 0, 0, 999_999))
         finally:
             self._settings_loading = False
+            self._update_ssh_password_visibility()
 
     def _refresh_rsync_preview(self) -> None:
         try:
@@ -586,16 +657,17 @@ class MainWindow(QWidget):
 
     def _reset_sync_transfer_panel(self) -> None:
         self._sync_progress_timer.stop()
+        self._stop_sync_session_wall_clock(reset_label=True)
         self._pending_sync_snap = None
         self._sync_attempt_shown = 1
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.setFormat("%p%")
-        self._lbl_sync_headline.setText("Idle — no transfer running.")
+        self._sync_bar_peak = 0
         self._lbl_sync_detail.setText(
-            "Live: bytes sent (when rsync reports them), job %, throughput, ETA, elapsed time, "
-            "and rsync counters. After a source scan, the bar can track bytes sent vs scanned size "
-            "while rsync’s own % stays at 0 on very large trees."
+            "Idle — no transfer running.\n\n"
+            "Details below update during sync (rsync elapsed, bytes, counters). "
+            "Progress and throughput are shown in the bar above."
         )
 
     def _sync_panel_starting(self) -> None:
@@ -605,20 +677,56 @@ class MainWindow(QWidget):
         self._progress.setValue(0)
         self._progress.setFormat("Starting rsync…")
         self._sync_attempt_shown = 1
-        self._lbl_sync_headline.setText("Starting rsync…")
+        self._sync_bar_peak = 0
         self._lbl_sync_detail.setText(
             "Waiting for the first progress line (can take a few seconds over SSH)."
+        )
+        self._sync_session_active = True
+        self._session_elapsed.start()
+        self._sync_session_wall_timer.start()
+        self._update_sync_session_elapsed_label()
+
+    @staticmethod
+    def _format_wall_elapsed_ms(ms: int) -> str:
+        if ms < 0:
+            ms = 0
+        sec = ms // 1000
+        h, r = divmod(sec, 3600)
+        m, s = divmod(r, 60)
+        if h:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        return f"{m:d}:{s:02d}"
+
+    def _stop_sync_session_wall_clock(self, *, reset_label: bool = False) -> None:
+        self._sync_session_wall_timer.stop()
+        if self._sync_session_active:
+            self._lbl_sync_elapsed.setText(
+                "Session elapsed: "
+                + self._format_wall_elapsed_ms(self._session_elapsed.elapsed())
+            )
+        self._sync_session_active = False
+        if reset_label:
+            self._lbl_sync_elapsed.setText("Session elapsed: —")
+
+    @Slot()
+    def _update_sync_session_elapsed_label(self) -> None:
+        if not self._sync_session_active:
+            return
+        self._lbl_sync_elapsed.setText(
+            "Session elapsed: "
+            + self._format_wall_elapsed_ms(self._session_elapsed.elapsed())
         )
 
     def _sync_transfer_bar_units(self, snap: RsyncProgressSnapshot) -> int:
         """
         Map transfer state to 0..10000 for the bar (finer than integer percent on huge trees).
 
-        Uses rsync's reported percent, bytes sent vs last scan size, and xfr# vs last scan file count.
+        Uses rsync's reported percent and bytes sent vs last scan size only (not ``xfr#``, which
+        steps every file and makes the bar jump). The UI applies a monotonic peak so the bar never
+        moves backward between updates.
         """
         rsync_u = min(10_000, max(0, snap.percent * 100))
         scan_b = self._last_scan[1]
-        scan_n = self._last_scan[0]
         byte_u = 0
         if (
             snap.transferred_bytes is not None
@@ -627,11 +735,7 @@ class MainWindow(QWidget):
             and snap.transferred_bytes >= 0
         ):
             byte_u = min(10_000, int(10_000 * snap.transferred_bytes / scan_b))
-        xfr_u = 0
-        xf = parse_rsync_xfr_count(snap.stats_raw)
-        if xf is not None and scan_n is not None and scan_n > 0:
-            xfr_u = min(10_000, int(10_000 * xf / scan_n))
-        return min(10_000, max(rsync_u, byte_u, xfr_u))
+        return min(10_000, max(rsync_u, byte_u))
 
     @Slot()
     def _flush_sync_transfer_ui(self) -> None:
@@ -640,31 +744,17 @@ class MainWindow(QWidget):
             return
         if self._progress.maximum() != 10_000:
             self._progress.setRange(0, 10_000)
-        bar_u = self._sync_transfer_bar_units(snap)
-        self._progress.setValue(bar_u)
         eta_disp = snap.eta
         if snap.percent >= 99 and snap.eta.strip() == "0:00:00":
             eta_disp = "finishing…"
         scan_b = self._last_scan[1]
-        scan_n = self._last_scan[0]
-        pct_bytes = (
-            (100.0 * snap.transferred_bytes / scan_b)
-            if (
-                snap.transferred_bytes is not None
-                and scan_b is not None
-                and scan_b > 0
-            )
-            else 0.0
-        )
-        xf = parse_rsync_xfr_count(snap.stats_raw)
-        pct_files = (
-            (100.0 * xf / scan_n)
-            if (xf is not None and scan_n is not None and scan_n > 0)
-            else 0.0
-        )
-        pct_disp = min(100.0, max(float(snap.percent), pct_bytes, pct_files))
-        # Qt treats "%%" as a literal "%" in setFormat; build two ASCII percent signs in Python.
-        fmt_bits: List[str] = [f"{pct_disp:.2f}" + "%%"]
+        raw_u = self._sync_transfer_bar_units(snap)
+        self._sync_bar_peak = max(self._sync_bar_peak, raw_u)
+        self._progress.setValue(self._sync_bar_peak)
+        pct_bar = min(100.0, self._sync_bar_peak / 100.0)
+        # Single U+0025 so Qt does not interpret "%%" as two visible percent signs on all styles.
+        _pct = "\u0025"
+        fmt_bits: List[str] = [f"{pct_bar:.2f}{_pct}"]
         if snap.transferred_display:
             fmt_bits.append(f"{snap.transferred_display} sent")
         elif snap.transferred_bytes is not None:
@@ -674,15 +764,6 @@ class MainWindow(QWidget):
         fmt_bits.append(snap.speed)
         fmt_bits.append(f"ETA {eta_disp}")
         self._progress.setFormat(" · ".join(fmt_bits))
-        head_bits: List[str] = []
-        if snap.transferred_display:
-            head_bits.append(f"{snap.transferred_display} sent")
-        elif snap.transferred_bytes is not None:
-            head_bits.append(f"{human_bytes(snap.transferred_bytes)} sent")
-        head_bits.append(f"{pct_disp:.2f}% complete")
-        head_bits.append(snap.speed)
-        head_bits.append(f"ETA {eta_disp}")
-        self._lbl_sync_headline.setText(" · ".join(head_bits))
         parts = [f"Elapsed {snap.elapsed}"]
         if snap.transferred_bytes is not None:
             parts.append(human_bytes(snap.transferred_bytes))
@@ -699,8 +780,10 @@ class MainWindow(QWidget):
         self._sync_progress_timer.start(80)
 
     def _append_log(self, line: str) -> None:
-        self._log.appendPlainText(line)
         sb = self._log.verticalScrollBar()
+        for segment in line.splitlines():
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._log.appendPlainText(f"[{ts}] {segment}")
         sb.setValue(sb.maximum())
 
     @Slot()
@@ -708,6 +791,21 @@ class MainWindow(QWidget):
         d = QFileDialog.getExistingDirectory(self, "Select source directory", self._source.text())
         if d:
             self._source.setText(d if d.endswith("/") else d + "/")
+
+    @Slot()
+    def _browse_destination(self) -> None:
+        start = self._dest.text().strip()
+        remote, _ = parse_rsync_destination(start)
+        if remote is not None:
+            start = str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Select destination directory", start)
+        if d:
+            self._dest.setText(d if d.endswith("/") else d + "/")
+
+    @Slot()
+    def _update_ssh_password_visibility(self) -> None:
+        show = self._parsed_destination()[0] is not None
+        self._ssh_pw_wrap.setVisible(show)
 
     @Slot(str)
     def _on_scan_phase(self, text: str) -> None:
@@ -1086,14 +1184,14 @@ class MainWindow(QWidget):
         self._btn_stop.setEnabled(False)
         if ok:
             self._sync_progress_timer.stop()
+            self._stop_sync_session_wall_clock(reset_label=False)
             self._pending_sync_snap = None
             self._progress.setRange(0, 10_000)
             self._progress.setValue(10_000)
-            self._progress.setFormat("100.00" + "%%" + " · complete")
-            self._lbl_sync_headline.setText(
+            self._progress.setFormat("100.00\u0025 · complete")
+            self._lbl_sync_detail.setText(
                 "Dry run finished." if was_dry else "Transfer finished successfully."
             )
-            self._lbl_sync_detail.setText("")
             if was_dry:
                 tail = "\n".join(self._log.toPlainText().splitlines()[-40:])
                 QMessageBox.information(
@@ -1105,12 +1203,14 @@ class MainWindow(QWidget):
                 QMessageBox.information(self, "Sync", "Backup completed successfully.")
         else:
             self._sync_progress_timer.stop()
+            self._stop_sync_session_wall_clock(reset_label=False)
             self._pending_sync_snap = None
             self._progress.setRange(0, 100)
             self._progress.setValue(0)
             self._progress.setFormat("%p%")
-            self._lbl_sync_headline.setText(f"Stopped or failed (exit code {code}).")
+            self._sync_bar_peak = 0
             self._lbl_sync_detail.setText(
+                f"Stopped or failed (exit code {code}). "
                 "Check the log for details. The worker may retry until you press Stop."
             )
             if code != 0:
@@ -1122,12 +1222,13 @@ class MainWindow(QWidget):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._sync_progress_timer.stop()
+        self._stop_sync_session_wall_clock(reset_label=False)
         self._pending_sync_snap = None
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.setFormat("%p%")
-        self._lbl_sync_headline.setText("Stopped by user.")
-        self._lbl_sync_detail.setText("")
+        self._sync_bar_peak = 0
+        self._lbl_sync_detail.setText("Stopped by user.")
 
 
 def run_app() -> int:

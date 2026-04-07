@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.4.7] - 2026-04-06
+
+### Fixed
+
+- **Progress bar label**: use a Unicode percent sign (U+0025) in `setFormat` instead of `%%`, which was rendering as a **double percent** on some Qt styles.
+- **Jumpy bar**: drop **`xfr#` / file-count** from the bar calculation (it advances every file); keep **rsync %** and **bytes / scanned size** only. Track a **monotonic peak** so the bar value never decreases between updates.
+
+### Changed
+
+- **File transfer**: removed the **bold duplicate line** under the bar (same data as the bar text). **Session elapsed** and the **detail line** (`Elapsed …`, bytes, verify/transfer counters, attempt) remain.
+
+## [1.4.6] - 2026-04-06
+
+### Added
+
+- **Activity log**: each appended line is prefixed with a local timestamp `[YYYY-MM-DD HH:MM:SS]`. Multi-line messages receive one timestamp per line.
+- **File transfer**: **Session elapsed** label under the progress bar—wall-clock time since **Start sync**, updated every 500 ms while a run is active; freezes on completion, stop, or failure (reset to `—` when the panel returns to idle).
+
+## [1.4.5] - 2026-04-06
+
+### Changed
+
+- **Paths**: destination row matches source—**Browse…** opens a local folder (starting from `$HOME` when the field is a remote `user@host:/path`). **SSH password** sits after the destination browse control and is **shown only for remote rsync destinations** (`parse_rsync_destination`). Source and destination fields use **`PathLineEdit`** styling (monospace, taller row, focus ring, clear button).
+
 ## [1.4.4] - 2026-04-06
 
 ### Fixed

@@ -12,9 +12,9 @@ Desktop application for **synchronizing local directories to remote hosts** over
 
 ## Overview
 
-SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script.
+SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script. Paths use monospace fields with browse buttons; the SSH password field appears inline only when the destination is remote.
 
-Session fields—including paths, dry-run, recursion, bandwidth limit, and extra rsync arguments—persist via `QSettings`. The SSH password field is **never** written to disk.
+Session fields—including paths, dry-run, recursion, bandwidth limit, and extra rsync arguments—persist via `QSettings`. The SSH password field is **never** written to disk. The activity log records **timestamps** on each line; during sync, **session elapsed** wall time appears under the transfer progress bar.
 
 ---
 
@@ -24,7 +24,7 @@ Session fields—including paths, dry-run, recursion, bandwidth limit, and extra
 - **Remote space** — Query free space with `df` over SSH, walking to parent paths when the destination directory does not exist yet.
 - **SSH** — Password-capable transport aligned with **Test SSH** (`PubkeyAuthentication=no` when a password is supplied so keyboard-interactive/password auth is reachable; `SSH_ASKPASS` / optional `sshpass`).
 - **Sync** — Builds rsync argv centrally (`--info=progress2`, `--info=name0`, timeouts, archive-style modes); worker loop retries on non-zero exit until success or user stop.
-- **Progress** — Transfer panel driven by parsed rsync progress lines; the bar uses fine steps (0..10000) with a rich label (% to two decimals, bytes sent, scanned total, speed, ETA). Estimates combine rsync %, bytes sent, and `xfr#` vs scan when available. Stdout and stderr progress lines are captured for the panel and omitted from the activity log; other rsync messages still log.
+- **Progress** — Parsed rsync progress drives a 0..10000 bar with a rich label (%, bytes sent, scanned total, speed, ETA); the bar is **monotonic** and uses rsync % plus bytes vs scan (not per-file `xfr#`, which is still shown in the detail line). Stdout/stderr progress lines are captured for the panel and omitted from the activity log.
 
 ---
 

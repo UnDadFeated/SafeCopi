@@ -449,8 +449,11 @@ _RSYNC_PROGRESS2_LINE = re.compile(
 # often "SIZE  PCT  SPEED  ETA" (no leading elapsed), e.g.
 # "        206.50K   0%  165.68MB/s    0:00:00 (xfr#1, to-chk=295659/295662)"
 _RSYNC_PROGRESS_SIZE_FIRST = re.compile(
-    r"^\s*\S+\s+(\d+)%\s+(\S+/s)\s+(\d+:\d+:\d+)(?:\s+(\([^)]*\)))?\s*$"
+    r"^\s*(\S+)\s+(\d+)%\s+(\S+/s)\s+(\d+:\d+:\d+)(?:\s+(\([^)]*\)))?\s*$"
 )
+
+# First column on size-first lines: "32.77K", "9.97M", "1.00G" (rsync uses K/M/G/T as 1024).
+_RSYNC_TRANS_AMOUNT = re.compile(r"^(\d+(?:\.\d+)?)([kKmMgGtTpP])?$")
 
 
 @dataclass(frozen=True)
@@ -463,6 +466,9 @@ class RsyncProgressSnapshot:
     eta: str
     stats_raw: str
     stats_human: str
+    # From size-first progress lines: cumulative bytes transferred (parsed) and raw token for UI.
+    transferred_bytes: Optional[int] = None
+    transferred_display: Optional[str] = None
 
 
 def _format_rsync_count_ratio(chunk: str) -> str:
@@ -516,6 +522,33 @@ def parse_rsync_progress2_line(line: str) -> Optional[RsyncProgressSnapshot]:
     return RsyncProgressSnapshot(pct, elapsed, speed, eta, raw, human)
 
 
+def parse_rsync_transferred_amount_token(tok: str) -> Optional[int]:
+    """
+    Parse the leading size token from rsync size-first progress lines into bytes.
+
+    Suffix letters follow rsync's human-readable convention (K/M/G/T/P as multiples of 1024).
+    """
+    t = tok.strip()
+    if not t:
+        return None
+    m = _RSYNC_TRANS_AMOUNT.match(t)
+    if not m:
+        return None
+    val = float(m.group(1))
+    suf = (m.group(2) or "").upper()
+    mult = {
+        "": 1,
+        "K": 1024,
+        "M": 1024**2,
+        "G": 1024**3,
+        "T": 1024**4,
+        "P": 1024**5,
+    }
+    if suf not in mult:
+        return None
+    return int(val * mult[suf])
+
+
 def parse_rsync_transfer_progress_line(line: str) -> Optional[RsyncProgressSnapshot]:
     """
     Parse one stderr line from an rsync transfer: ``--info=progress2`` form first,
@@ -527,18 +560,28 @@ def parse_rsync_transfer_progress_line(line: str) -> Optional[RsyncProgressSnaps
     m = _RSYNC_PROGRESS_SIZE_FIRST.match(line)
     if not m:
         return None
-    pct_s, speed, eta = m.group(1), m.group(2), m.group(3)
+    size_tok, pct_s, speed, eta = m.group(1), m.group(2), m.group(3), m.group(4)
     pct = max(0, min(100, int(pct_s)))
     raw = ""
-    g4 = m.group(4)
-    if g4:
-        inner = g4.strip()
+    g5 = m.group(5)
+    if g5:
+        inner = g5.strip()
         if inner.startswith("(") and inner.endswith(")"):
             raw = inner[1:-1].strip()
         else:
             raw = inner
     human = humanize_rsync_progress_stats(raw)
-    return RsyncProgressSnapshot(pct, "—", speed, eta, raw, human)
+    tb = parse_rsync_transferred_amount_token(size_tok)
+    return RsyncProgressSnapshot(
+        pct,
+        "—",
+        speed,
+        eta,
+        raw,
+        human,
+        transferred_bytes=tb,
+        transferred_display=size_tok,
+    )
 
 
 def should_log_rsync_stderr_line(line: str) -> bool:

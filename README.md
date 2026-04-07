@@ -24,7 +24,7 @@ Session fields—including paths, dry-run, recursion, bandwidth limit, and extra
 - **Remote space** — Query free space with `df` over SSH, walking to parent paths when the destination directory does not exist yet.
 - **SSH** — Password-capable transport aligned with **Test SSH** (`PubkeyAuthentication=no` when a password is supplied so keyboard-interactive/password auth is reachable; `SSH_ASKPASS` / optional `sshpass`).
 - **Sync** — Builds rsync argv centrally (`--info=progress2`, `--info=name0`, timeouts, archive-style modes); worker loop retries on non-zero exit until success or user stop.
-- **Progress** — Transfer panel driven by parsed rsync progress lines; activity log filters routine stderr noise while retaining errors and milestones.
+- **Progress** — Transfer panel driven by parsed rsync progress lines (throughput, ETA, bytes-sent token, and—after a source scan—a bar estimate from bytes sent vs scanned size when rsync’s own % is still 0); activity log filters routine stderr noise while retaining errors and milestones.
 
 ---
 

@@ -590,7 +590,9 @@ class MainWindow(QWidget):
         self._progress.setValue(0)
         self._lbl_sync_headline.setText("Idle — no transfer running.")
         self._lbl_sync_detail.setText(
-            "Live: overall job %, throughput, ETA, elapsed time, and rsync counters when the tool reports them."
+            "Live: bytes sent (when rsync reports them), job %, throughput, ETA, elapsed time, "
+            "and rsync counters. After a source scan, the bar can track bytes sent vs scanned size "
+            "while rsync’s own % stays at 0 on very large trees."
         )
 
     def _sync_panel_starting(self) -> None:
@@ -608,14 +610,33 @@ class MainWindow(QWidget):
         snap = self._pending_sync_snap
         if snap is None:
             return
-        self._progress.setValue(snap.percent)
+        rsync_pct = max(0, min(100, snap.percent))
+        bar_pct = rsync_pct
+        scan_b = self._last_scan[1]
+        if (
+            snap.transferred_bytes is not None
+            and scan_b is not None
+            and scan_b > 0
+            and snap.transferred_bytes >= 0
+        ):
+            est = int(min(99, max(0, 100 * snap.transferred_bytes / scan_b)))
+            bar_pct = max(rsync_pct, est)
+        self._progress.setValue(bar_pct)
         eta_disp = snap.eta
         if snap.percent >= 99 and snap.eta.strip() == "0:00:00":
             eta_disp = "finishing…"
-        self._lbl_sync_headline.setText(
-            f"{snap.percent}% complete · {snap.speed} · ETA {eta_disp}"
-        )
+        head_bits: List[str] = []
+        if snap.transferred_display:
+            head_bits.append(f"{snap.transferred_display} sent")
+        elif snap.transferred_bytes is not None:
+            head_bits.append(f"{human_bytes(snap.transferred_bytes)} sent")
+        head_bits.append(f"{snap.percent}% complete")
+        head_bits.append(snap.speed)
+        head_bits.append(f"ETA {eta_disp}")
+        self._lbl_sync_headline.setText(" · ".join(head_bits))
         parts = [f"Elapsed {snap.elapsed}"]
+        if snap.transferred_bytes is not None:
+            parts.append(human_bytes(snap.transferred_bytes))
         if snap.stats_human:
             parts.append(snap.stats_human)
         parts.append(f"Attempt {self._sync_attempt_shown}")

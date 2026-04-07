@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.3] - 2026-04-06
+
+### Changed
+
+- **Transfer panel**: size-first rsync progress lines now expose cumulative **bytes sent** (`transferred_bytes` / `transferred_display` on `RsyncProgressSnapshot`). The headline shows **`<token> sent · % · speed · ETA`**; the detail line includes canonical **KiB/MiB/…** via `human_bytes` when parsing succeeds.
+- **Progress bar**: when a **source scan** total size is available, the bar uses `max(rsync %, bytes_sent / scanned_size)` so it advances during long jobs where rsync’s overall percentage stays at **0%** (multi‑tebibyte trees).
+
+### Added
+
+- **`parse_rsync_transferred_amount_token()`** in `utils` for rsync size tokens (`K`/`M`/`G`/`T`/`P` as 1024-based multiples).
+
 ## [1.4.2] - 2026-04-06
 
 ### Changed

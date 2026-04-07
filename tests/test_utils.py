@@ -5,6 +5,7 @@ from safecopi.utils import (
     humanize_rsync_progress_stats,
     parse_extra_rsync_args,
     parse_rsync_progress2_line,
+    parse_rsync_transferred_amount_token,
     parse_rsync_transfer_progress_line,
     should_log_rsync_stderr_line,
 )
@@ -82,6 +83,12 @@ def test_humanize_ir_chk() -> None:
     assert "2,855" in h
 
 
+def test_parse_rsync_transferred_amount_token() -> None:
+    assert parse_rsync_transferred_amount_token("32.77K") == int(32.77 * 1024)
+    assert parse_rsync_transferred_amount_token("9.97M") == int(9.97 * 1024**2)
+    assert parse_rsync_transferred_amount_token("12345") == 12345
+
+
 def test_parse_rsync_transfer_progress_line_size_first() -> None:
     line = (
         "        206.50K   0%  165.68MB/s    0:00:00 "
@@ -93,6 +100,8 @@ def test_parse_rsync_transfer_progress_line_size_first() -> None:
     assert s.elapsed == "—"
     assert s.speed == "165.68MB/s"
     assert s.eta == "0:00:00"
+    assert s.transferred_display == "206.50K"
+    assert s.transferred_bytes == int(206.50 * 1024)
     assert "295,659" in s.stats_human or "295659" in s.stats_raw
 
 
@@ -102,6 +111,8 @@ def test_parse_rsync_transfer_progress_line_prefers_progress2() -> None:
     assert s is not None
     assert s.percent == 3
     assert s.elapsed == "0:00:01"
+    assert s.transferred_bytes is None
+    assert s.transferred_display is None
 
 
 def test_should_log_rsync_stderr_line() -> None:

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.2] - 2026-04-06
+
+### Changed
+
+- **README**: restructured for GitHub (overview, features table, requirements, install, run, usage, development). Added **GitHub repository metadata** section with copy-paste description text and suggested topics for the repository About field.
+
 ## [1.4.1] - 2026-04-06
 
 ### Changed

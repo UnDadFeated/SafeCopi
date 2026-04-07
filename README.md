@@ -1,71 +1,127 @@
 # SafeCopi
 
-**Quick start (no `activate`, works in fish):** `./bootstrap` then `.venv/bin/python -m safecopi` or `./run-safecopi`.
+Desktop application for **synchronizing local directories to remote hosts** over SSH using **rsync**. It targets long-running backups and archives: interactive preflight checks, parsed transfer progress, bounded I/O timeouts, and automatic retries on failure.
 
-Desktop utility for **reliable local-to-remote copies** using `rsync` over SSH. It wraps the same resilient pattern as a long shell script: overall progress (`--info=progress2`), I/O timeouts, automatic retries after failures, optional `--partial` resumes, and preflight checks (source scan, destination free space, SSH connectivity).
+| Attribute | Details |
+| :--- | :--- |
+| Stack | Python 3.10+, PySide6 |
+| Transport | OpenSSH + rsync |
+| Version | [`safecopi/__init__.py`](safecopi/__init__.py) · [`CHANGELOG.md`](CHANGELOG.md) |
 
-The window uses a **fixed size** (non-resizable) layout with a dark theme (**720×880** px).
+---
 
-Paths, delays, dry-run, **recursive copy (subdirectories)**, partial mode, bandwidth limit, and extra rsync flags are **remembered** between sessions (`QSettings`). The SSH password field is **never** saved to disk.
+## Overview
+
+SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script.
+
+Session fields—including paths, dry-run, recursion, bandwidth limit, and extra rsync arguments—persist via `QSettings`. The SSH password field is **never** written to disk.
+
+---
+
+## Features
+
+- **Preflight** — Walk the source tree for file count and total size (incremental UI updates for slow or network-backed paths).
+- **Remote space** — Query free space with `df` over SSH, walking to parent paths when the destination directory does not exist yet.
+- **SSH** — Password-capable transport aligned with **Test SSH** (`PubkeyAuthentication=no` when a password is supplied so keyboard-interactive/password auth is reachable; `SSH_ASKPASS` / optional `sshpass`).
+- **Sync** — Builds rsync argv centrally (`--info=progress2`, `--info=name0`, timeouts, archive-style modes); worker loop retries on non-zero exit until success or user stop.
+- **Progress** — Transfer panel driven by parsed rsync progress lines; activity log filters routine stderr noise while retaining errors and milestones.
+
+---
 
 ## Requirements
 
-- Python 3.10+
-- PySide6 (see `requirements.txt`)
-- `rsync` and `ssh` on `PATH`
-- For remote destinations `user@host:/path`, **SSH keys** are recommended for unattended syncs (leave the password field empty). For password auth, use the **SSH password** field with **`sshpass`** installed (`sudo pacman -S sshpass` on Arch/CachyOS), or rely on **`SSH_ASKPASS`** GUI prompts when sshpass is missing. If you see “Permission denied, please try again” in the log, the server reached password authentication—usually wrong password or account policy; confirm with `ssh user@host` in a terminal.
+| Dependency | Notes |
+| --- | --- |
+| Python | 3.10 or newer |
+| Packages | [`requirements.txt`](requirements.txt) (PySide6) |
+| System tools | `rsync`, `ssh` on `PATH` |
+| Password auth (optional) | `sshpass` recommended when not using keys; on Arch/CachyOS: `sudo pacman -S sshpass` |
 
-## Install
+SSH **public keys** are recommended for unattended copies. If authentication fails with repeated “Permission denied”, verify credentials and server policy with `ssh user@host` from a terminal.
 
-**Fish shell:** Do **not** run `source .venv/bin/activate` — that file is for bash/zsh and breaks in fish. You do **not** need to “activate” the venv at all.
+---
 
-**Arch / PEP 668:** Use the venv’s `pip` and `python` explicitly. Plain `pip` / `python` after a failed activate still target the system interpreter and trigger *externally-managed-environment*.
+## Installation
 
-One-time setup (copy-paste as-is; works in bash, zsh, **fish**, etc.):
+Create a virtual environment and install dependencies (works in **bash**, **zsh**, and **fish** without relying on `activate` for day-to-day runs):
 
 ```bash
 cd /path/to/SafeCopi
 python -m venv .venv
+.venv/bin/pip install -U pip
 .venv/bin/pip install -r requirements.txt
 ```
 
-Optional: if you use fish and want activation, use only `source .venv/bin/activate.fish`, never `activate` (bash).
+Alternatively, from the repository root:
 
-## Run
+```sh
+./bootstrap
+```
 
-**Recommended (no activation):**
+**Fish:** Do not `source .venv/bin/activate` (that file targets bash/zsh). Prefer `.venv/bin/python` directly, or `source .venv/bin/activate.fish` only if you want a traditional activate workflow.
+
+**PEP 668 (e.g. Arch):** Use the venv interpreter explicitly (`.venv/bin/pip`, `.venv/bin/python`) so installs do not hit the system-managed environment error.
+
+---
+
+## Running the application
 
 ```bash
 cd /path/to/SafeCopi
 .venv/bin/python -m safecopi
 ```
 
-Or use the launcher (after `chmod +x run-safecopi` once):
+Or, after `chmod +x run-safecopi`:
 
 ```bash
 ./run-safecopi
 ```
 
-## Usage notes
+---
 
-1. **Source** must be a **local** directory (mounted NAS is fine).
-2. **Destination** is an rsync URI, e.g. `user@host:/mnt/backup/Archive/`.
-3. Use **Check destination space** before a large run; remote free space is queried with `df` over SSH (tries the destination path and parent directories if the folder does not exist yet).
-4. **Scan source** walks the tree once, summing each file’s size (`getsize`) while counting—updates about every **250 files** or **200 ms** so **LAN / NAS** paths stay responsive (no blocking `du` first). Total size is the sum of file lengths (can differ slightly from `du` for sparse/special files).
-5. **Trailing slash** on the source path changes rsync semantics (`dir/` vs `dir`); the UI reminds you of this.
-6. **Dry run** adds `--dry-run` (no writes).
-7. **Include subdirectories (recursive)** is on by default (`-ah` / full tree). Turn it off to sync only the top level of the source folder (rsync without `-r`).
-8. **Partial transfers**: choose **Resume (--partial)** to continue interrupted files, or **Re-copy interrupted files (no --partial)** so a failed file is removed and copied again from the start on the next run.
-9. Remote syncs pass explicit `ssh` options via `rsync -e` so behavior matches **Test SSH** (including `PubkeyAuthentication=no` so password auth can run when keys are not used).
-10. During sync, **overall progress** (`--info=progress2` plus size/speed lines) updates the transfer panel; the log omits per-file paths and routine progress chatter so errors and milestones stay visible (`--info=name0` and stderr filtering).
+## Usage
 
-## Testing (optional)
+1. **Source** — Local directory (including mounted NAS paths).
+2. **Destination** — Rsync-style URI, e.g. `user@host:/mnt/backup/Archive/`.
+3. **Trailing slash** — Rsync semantics differ for `path` vs `path/`; the UI calls this out.
+4. **Check destination space** — Recommended before large runs.
+5. **Scan source** — Optional; counts files and sums sizes with periodic UI updates (~250 files or ~200 ms). Totals reflect `getsize` sums (may differ slightly from `du` for sparse or special files).
+6. **Dry run** — Adds `--dry-run` (no writes).
+7. **Subdirectories** — Recursive copy (`-ah`) is default; disabling limits to the top level (`-hlptgoD` without `-r`).
+8. **Partial files** — Choose resume (`--partial`) or full re-copy of interrupted files on the next run.
+9. **Sync log** — High-signal lines only; per-file path spam is suppressed via `--info=name0` and filtering while the progress panel shows overall transfer state.
+
+---
+
+## Development
+
+Install test dependencies and run the suite headlessly:
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
 QT_QPA_PLATFORM=offscreen .venv/bin/pytest tests/
 ```
 
-## Version
+---
 
-Current version: **1.4.1** (see `safecopi/__init__.py` and `CHANGELOG.md`).
+## GitHub repository metadata
+
+Use the following in the repository **About** settings (description, topics, and optional website).
+
+**Description** (copy into the *Description* field, ≤350 characters):
+
+```text
+Desktop app to sync local directories to remote paths over SSH with rsync—progress UI, retries, timeouts, and preflight checks (space, SSH). Built with Python and PySide6.
+```
+
+**Topics** (suggested):
+
+`rsync` `ssh` `backup` `sync` `pyside6` `pyqt` `python` `linux` `gui` `file-transfer`
+
+**Website** (optional): leave blank or set to the repository URL if you do not publish a separate site.
+
+---
+
+## Changelog
+
+Release history: [`CHANGELOG.md`](CHANGELOG.md).

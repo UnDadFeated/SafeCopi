@@ -12,7 +12,7 @@ Desktop application for **synchronizing local directories to remote hosts** over
 
 ## Overview
 
-SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script. Paths use monospace fields with browse buttons; **Src.** / **Dest. password** fields appear inline when that side is a remote `user@host:/path`.
+SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script. **Preflight** and **File transfer** sit **side by side** (~¼ / ~¾ width) to save vertical space. Paths use monospace fields with browse buttons; **Src.** / **Dest. password** fields appear inline when that side is a remote `user@host:/path`.
 
 Session fields—including paths, dry-run, recursion, bandwidth limit, and extra rsync arguments—persist via `QSettings`. SSH password fields are **never** written to disk. The activity log records **timestamps** on each line; during sync, **session elapsed** wall time appears under the transfer progress bar.
 
@@ -20,11 +20,11 @@ Session fields—including paths, dry-run, recursion, bandwidth limit, and extra
 
 ## Features
 
-- **Preflight** — Walk the source tree for file count and total size (incremental UI updates for slow or network-backed paths).
+- **Preflight** — Walk the source tree for file count and total size (incremental UI updates for slow or network-backed paths). While a scan runs, path fields, rsync options, **Test SSH**, **Dest. space**, and **Start sync** are disabled; **Scan source** / **Stop scan** are centered in the action row. An idle red guide pulse (fixed-width border, no layout jump) steps through **Browse** / **Scan** / destination **Browse**, then **Test SSH** and **Dest. space** when the workflow needs them, then **Start sync**.
 - **Remote space** — Query free space with `df` over SSH, walking to parent paths when the destination directory does not exist yet.
 - **SSH** — Password-capable transport for **source and/or destination** remotes (`PubkeyAuthentication=no` when a password is supplied; `SSH_ASKPASS` / optional `sshpass`). **Test SSH** checks the destination host if remote, else the source host.
-- **Sync** — Builds rsync argv centrally (`--info=progress2`, `--info=name0`, timeouts, archive-style modes); worker loop retries on non-zero exit until success or user stop. Path fields, rsync options, **Test SSH**, **Dest. space**, and **Scan source** are disabled for the duration of a run (including between retries).
-- **Progress** — Parsed rsync progress drives a 0..10000 bar with a rich label (%, bytes sent, scanned total in decimal **KB/MB/GB/TB**, speed, **ETA** with stable **`HH:MM:SS`**-style times); the bar is **monotonic** and uses rsync % plus bytes vs scan (not per-file `xfr#`, which is still shown in the detail line). Stdout/stderr progress lines are captured for the panel and omitted from the activity log.
+- **Sync** — Builds rsync argv centrally (`--info=progress2`, `--info=name0`, timeouts, archive-style modes); worker loop retries on non-zero exit until success or user stop. Path fields, rsync options, **Test SSH**, **Dest. space**, and **Scan source** are disabled for the duration of a run (including between retries); **Start sync** is also disabled during an active **Scan source** run.
+- **Progress** — Parsed rsync progress drives a 0..10000 bar with a rich label (%, **bytes left** vs the last **source scan** total when available, speed, **ETA** from remaining÷throughput or rsync’s ETA); the bar follows **sent ÷ scanned size** when a preflight scan exists, else rsync’s overall percent. The bar is **monotonic** (not per-file `xfr#`, still in the detail line). Stdout/stderr progress lines are captured for the panel and omitted from the activity log.
 
 ---
 

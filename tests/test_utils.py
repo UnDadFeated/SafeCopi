@@ -1,12 +1,16 @@
 """Unit tests for helpers (no Qt display required)."""
 
+import pytest
+
 from safecopi.utils import (
     build_rsync_command_argv,
     format_rsync_hms_for_display,
+    format_seconds_as_hms_display,
     human_bytes,
     humanize_rsync_progress_stats,
     parse_extra_rsync_args,
     parse_rsync_progress2_line,
+    parse_rsync_speed_to_bytes_per_sec,
     parse_rsync_transferred_amount_token,
     parse_rsync_transfer_progress_line,
     parse_rsync_xfr_count,
@@ -129,6 +133,18 @@ def test_format_rsync_hms_for_display() -> None:
     assert format_rsync_hms_for_display("71:36:26") == "71:36:26"
     assert format_rsync_hms_for_display("102:05:03") == "102:05:03"
     assert format_rsync_hms_for_display("—") == "—"
+
+
+def test_format_seconds_as_hms_display() -> None:
+    assert format_seconds_as_hms_display(8 * 60 + 28) == "00:08:28"
+    assert format_seconds_as_hms_display(71 * 3600 + 36 * 60 + 26) == "71:36:26"
+
+
+def test_parse_rsync_speed_to_bytes_per_sec() -> None:
+    assert parse_rsync_speed_to_bytes_per_sec("12.50MiB/s") == pytest.approx(12.50 * 1024**2)
+    assert parse_rsync_speed_to_bytes_per_sec("165.68MB/s") == pytest.approx(165.68 * 1024**2)
+    assert parse_rsync_speed_to_bytes_per_sec("0.00kB/s") == 0.0
+    assert parse_rsync_speed_to_bytes_per_sec("1.00MiB/s") == pytest.approx(1024**2)
 
 
 def test_human_bytes_si() -> None:

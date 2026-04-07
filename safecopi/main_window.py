@@ -46,8 +46,12 @@ from safecopi.utils import (
     RsyncProgressSnapshot,
     build_rsync_command_argv,
     ensure_ssh_askpass_wrapper,
+    fetch_latest_github_version,
     format_rsync_hms_for_display,
+    format_seconds_as_hms_display,
     human_bytes,
+    is_remote_version_newer,
+    parse_rsync_speed_to_bytes_per_sec,
     local_free_bytes,
     parse_extra_rsync_args,
     parse_rsync_destination,
@@ -68,6 +72,7 @@ class MainWindow(QWidget):
         self._last_sync_was_dry_run = False
         self._last_scan: Tuple[Optional[int], Optional[int]] = (None, None)
         self._dest_free_bytes: Optional[int] = None
+        self._ssh_ok_this_session: bool = False
         self._scan_thread: Optional[QThread] = None
         self._scan_worker_ref: Optional[SourceScanWorker] = None
         self._scan_pending_n: int = 0
@@ -75,6 +80,11 @@ class MainWindow(QWidget):
         self._scan_ui_timer = QTimer(self)
         self._scan_ui_timer.setSingleShot(True)
         self._scan_ui_timer.timeout.connect(self._flush_scan_progress_ui)
+        self._guide_pulse_timer = QTimer(self)
+        self._guide_pulse_timer.setInterval(550)
+        self._guide_pulse_timer.timeout.connect(self._pulse_guide)
+        self._guide_glow_phase = 0
+        self._guide_target: Optional[QPushButton] = None
         self._persist_timer = QTimer(self)
         self._persist_timer.setSingleShot(True)
         self._persist_timer.timeout.connect(self._persist_settings)
@@ -351,6 +361,7 @@ class MainWindow(QWidget):
         stats = QGroupBox("Preflight")
         fs = QFormLayout(stats)
         self._compact_form(fs)
+        fs.setHorizontalSpacing(4)
         fs.addRow("Source files", self._lbl_files)
         fs.addRow("Source size", self._lbl_src_size)
         fs.addRow("Destination free", self._lbl_dest_free)
@@ -369,22 +380,30 @@ class MainWindow(QWidget):
             self._btn_stop,
         ):
             b.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        actions.addWidget(self._btn_ssh)
-        actions.addWidget(self._btn_space)
-        actions.addWidget(self._btn_scan)
-        actions.addWidget(self._btn_stop_scan)
-        actions.addStretch()
-        actions.addWidget(self._btn_start)
-        actions.addWidget(self._btn_stop)
+        actions.addWidget(self._btn_ssh, 0)
+        actions.addWidget(self._btn_space, 0)
+        actions.addStretch(1)
+        actions.addWidget(self._btn_scan, 0)
+        actions.addWidget(self._btn_stop_scan, 0)
+        actions.addStretch(1)
+        actions.addWidget(self._btn_start, 0)
+        actions.addWidget(self._btn_stop, 0)
+
+        preflight_transfer_row = QWidget()
+        pt_lay = QHBoxLayout(preflight_transfer_row)
+        pt_lay.setContentsMargins(0, 0, 0, 0)
+        pt_lay.setSpacing(6)
+        # Preflight ~25% width, File transfer ~75% (one row to save vertical space).
+        pt_lay.addWidget(stats, 1, Qt.AlignmentFlag.AlignTop)
+        pt_lay.addWidget(transfer, 3, Qt.AlignmentFlag.AlignTop)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 6, 8, 6)
         root.setSpacing(4)
         root.addWidget(paths)
         root.addWidget(opts)
-        root.addWidget(stats)
+        root.addWidget(preflight_transfer_row)
         root.addLayout(actions)
-        root.addWidget(transfer)
         root.addWidget(cmd_box)
 
         log_btns = QHBoxLayout()
@@ -395,9 +414,15 @@ class MainWindow(QWidget):
         self._btn_save_log = QPushButton("Save log…")
         self._btn_save_log.setToolTip("Save the log to a text file.")
         self._btn_save_log.clicked.connect(self._save_log)
+        self._btn_check_update = QPushButton("Check for update…")
+        self._btn_check_update.setToolTip(
+            "Check GitHub for a newer SafeCopi release (compares against this build’s version)."
+        )
+        self._btn_check_update.clicked.connect(self._check_for_update)
         log_btns.addWidget(self._btn_copy_log)
         log_btns.addWidget(self._btn_save_log)
         log_btns.addStretch()
+        log_btns.addWidget(self._btn_check_update)
         root.addLayout(log_btns)
 
         root.addWidget(self._log, stretch=1)
@@ -415,6 +440,7 @@ class MainWindow(QWidget):
         self._rsync.stopped_by_user.connect(self._on_stopped)
 
         self._reset_sync_transfer_panel()
+        self._sync_guide_pulse()
 
     @staticmethod
     def _compact_form(form: QFormLayout) -> None:
@@ -477,9 +503,9 @@ class MainWindow(QWidget):
             }
             QPushButton {
                 background-color: #45475a;
-                border: 1px solid #585b70;
+                border: 2px solid #585b70;
                 border-radius: 4px;
-                padding: 5px 10px;
+                padding: 4px 9px;
                 min-width: 0;
             }
             QPushButton:hover { background-color: #585b70; }
@@ -510,6 +536,10 @@ class MainWindow(QWidget):
                     stop:0 #74c7ec, stop:1 #89b4fa);
                 border-radius: 4px;
             }
+            QPushButton[guidePulse="true"] {
+                border: 2px solid #ef4444;
+                padding: 4px 9px;
+            }
             """
         )
 
@@ -536,6 +566,8 @@ class MainWindow(QWidget):
     def _wire_settings_persistence(self) -> None:
         for w in (self._source, self._dest, self._extra_rsync):
             w.textChanged.connect(self._debounce_settings_and_preview)
+        self._source.textChanged.connect(self._on_paths_or_ssh_context_changed)
+        self._dest.textChanged.connect(self._on_paths_or_ssh_context_changed)
         self._source.textChanged.connect(self._update_ssh_password_visibility)
         self._dest.textChanged.connect(self._update_ssh_password_visibility)
         self._timeout.valueChanged.connect(self._debounce_settings_and_preview)
@@ -545,6 +577,11 @@ class MainWindow(QWidget):
         self._recursive_subdirs.toggled.connect(self._debounce_settings_and_preview)
         self._radio_resume_partial.toggled.connect(self._debounce_settings_and_preview)
         self._radio_redo_partial.toggled.connect(self._debounce_settings_and_preview)
+
+    @Slot()
+    def _on_paths_or_ssh_context_changed(self) -> None:
+        self._ssh_ok_this_session = False
+        self._sync_guide_pulse()
 
     @Slot()
     def _debounce_settings_and_preview(self) -> None:
@@ -746,21 +783,22 @@ class MainWindow(QWidget):
         """
         Map transfer state to 0..10000 for the bar (finer than integer percent on huge trees).
 
-        Uses rsync's reported percent and bytes sent vs last scan size only (not ``xfr#``, which
-        steps every file and makes the bar jump). The UI applies a monotonic peak so the bar never
+        When a **preflight source scan** total exists, progress follows **bytes sent / scanned
+        size** (not rsync's internal % or ``xfr#``, which jump between files). Without a scan,
+        falls back to rsync's overall percent. The UI applies a monotonic peak so the bar never
         moves backward between updates.
         """
-        rsync_u = min(10_000, max(0, snap.percent * 100))
         scan_b = self._last_scan[1]
-        byte_u = 0
         if (
-            snap.transferred_bytes is not None
-            and scan_b is not None
+            scan_b is not None
             and scan_b > 0
+            and snap.transferred_bytes is not None
             and snap.transferred_bytes >= 0
         ):
-            byte_u = min(10_000, int(10_000 * snap.transferred_bytes / scan_b))
-        return min(10_000, max(rsync_u, byte_u))
+            return min(10_000, int(10_000 * min(1.0, snap.transferred_bytes / scan_b)))
+        if scan_b is not None and scan_b > 0:
+            return min(10_000, max(0, int(10_000 * snap.percent / 100)))
+        return min(10_000, max(0, snap.percent * 100))
 
     @Slot()
     def _flush_sync_transfer_ui(self) -> None:
@@ -769,11 +807,35 @@ class MainWindow(QWidget):
             return
         if self._progress.maximum() != 10_000:
             self._progress.setRange(0, 10_000)
-        eta_norm = format_rsync_hms_for_display(snap.eta)
-        eta_disp = eta_norm
-        if snap.percent >= 99 and eta_norm == "00:00:00":
-            eta_disp = "finishing…"
         scan_b = self._last_scan[1]
+        tb = snap.transferred_bytes
+
+        left_b: Optional[int] = None
+        if scan_b is not None and scan_b > 0:
+            if tb is not None:
+                left_b = max(0, scan_b - tb)
+            else:
+                left_b = max(0, int(scan_b * (100 - snap.percent) / 100))
+
+        speed_bps = parse_rsync_speed_to_bytes_per_sec(snap.speed)
+        use_scan_eta = (
+            left_b is not None
+            and speed_bps is not None
+            and speed_bps > 1e-9
+        )
+        if use_scan_eta:
+            eta_disp = format_seconds_as_hms_display(left_b / speed_bps)
+        else:
+            eta_disp = format_rsync_hms_for_display(snap.eta)
+
+        rsync_eta_norm = format_rsync_hms_for_display(snap.eta)
+        if snap.percent >= 99 and (
+            (use_scan_eta and eta_disp == "00:00:00")
+            or (not use_scan_eta and rsync_eta_norm == "00:00:00")
+            or (left_b is not None and left_b == 0)
+        ):
+            eta_disp = "finishing…"
+
         raw_u = self._sync_transfer_bar_units(snap)
         self._sync_bar_peak = max(self._sync_bar_peak, raw_u)
         self._progress.setValue(self._sync_bar_peak)
@@ -781,11 +843,13 @@ class MainWindow(QWidget):
         # Single U+0025 so Qt does not interpret "%%" as two visible percent signs on all styles.
         _pct = "\u0025"
         fmt_bits: List[str] = [f"{pct_bar:.2f}{_pct}"]
-        if snap.transferred_bytes is not None:
-            fmt_bits.append(f"{human_bytes(snap.transferred_bytes)} sent")
+        if left_b is not None:
+            fmt_bits.append(f"{human_bytes(left_b)} left")
+        elif tb is not None:
+            fmt_bits.append(f"{human_bytes(tb)} sent")
         elif snap.transferred_display:
             fmt_bits.append(f"{snap.transferred_display} sent")
-        if scan_b is not None and scan_b > 0:
+        elif scan_b is not None and scan_b > 0:
             fmt_bits.append(f"of {human_bytes(scan_b)} scanned")
         fmt_bits.append(snap.speed)
         fmt_bits.append(f"ETA {eta_disp}")
@@ -885,8 +949,7 @@ class MainWindow(QWidget):
                 f"Scan done: {c if c is not None else '?'} files, "
                 f"{human_bytes(s) if s is not None else '?'}"
             )
-        self._btn_scan.setEnabled(True)
-        self._btn_stop_scan.setEnabled(False)
+        self._set_scan_source_interaction_locked(False)
         self._lbl_scan_idle.setVisible(True)
         self._scan_bar.setVisible(False)
         self._scan_bar.setToolTip("")
@@ -905,8 +968,7 @@ class MainWindow(QWidget):
         self._append_log(f"Scan failed: {msg}")
         self._lbl_files.setText("—")
         self._lbl_src_size.setText("—")
-        self._btn_scan.setEnabled(True)
-        self._btn_stop_scan.setEnabled(False)
+        self._set_scan_source_interaction_locked(False)
         self._lbl_scan_idle.setVisible(True)
         self._scan_bar.setVisible(False)
         self._scan_bar.setToolTip("")
@@ -1079,6 +1141,8 @@ class MainWindow(QWidget):
                     "Connection OK (password / GUI or keys as configured).",
                 )
                 self._append_log("SSH: OK")
+                self._ssh_ok_this_session = True
+                self._sync_guide_pulse()
             else:
                 err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
                 hint = ""
@@ -1096,9 +1160,13 @@ class MainWindow(QWidget):
                     )
                 QMessageBox.warning(self, "SSH test", f"Failed:\n{err}{hint}")
                 self._append_log(f"SSH: failed — {err}")
+                self._ssh_ok_this_session = False
+                self._sync_guide_pulse()
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "SSH test", str(e))
             self._append_log(f"SSH: error — {e}")
+            self._ssh_ok_this_session = False
+            self._sync_guide_pulse()
 
     @Slot()
     def _check_dest_space(self) -> None:
@@ -1109,6 +1177,7 @@ class MainWindow(QWidget):
             self._dest_free_bytes = free
             self._lbl_dest_free.setText(human_bytes(free) if free is not None else "— (unreadable)")
             self._append_log(f"Local destination free: {human_bytes(free)}")
+            self._sync_guide_pulse()
             return
         self._append_log(f"Querying free space on {remote.ssh_spec()}:{rpath} …")
         try:
@@ -1133,6 +1202,7 @@ class MainWindow(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Space check", str(e))
             self._append_log(f"Space check error: {e}")
+        self._sync_guide_pulse()
 
     @Slot()
     def _scan_source(self) -> None:
@@ -1155,8 +1225,8 @@ class MainWindow(QWidget):
 
         self._scan_pending_n = 0
         self._scan_pending_b = 0
-        self._btn_scan.setEnabled(False)
-        self._btn_stop_scan.setEnabled(True)
+        self._set_scan_source_interaction_locked(True)
+        self._sync_guide_pulse()
         self._append_log(f"Scanning source (may take a while): {path}")
         self._lbl_files.setText("—")
         self._lbl_src_size.setText("…")
@@ -1212,6 +1282,117 @@ class MainWindow(QWidget):
             )
             self._btn_scan.setEnabled(not scan_running)
             self._btn_stop_scan.setEnabled(scan_running)
+
+    def _set_scan_source_interaction_locked(self, locked: bool) -> None:
+        """
+        While a local source scan runs, disable paths, rsync options, preflight actions that could
+        change the session, and **Start sync**. **Stop scan** stays enabled until cancelled or done.
+        """
+        fields = (
+            self._source,
+            self._dest,
+            self._ssh_password_src,
+            self._ssh_password,
+            self._btn_browse,
+            self._btn_browse_dest,
+            self._timeout,
+            self._retry,
+            self._dry_run,
+            self._recursive_subdirs,
+            self._radio_resume_partial,
+            self._radio_redo_partial,
+            self._bwlimit,
+            self._extra_rsync,
+            self._btn_ssh,
+            self._btn_space,
+            self._btn_start,
+        )
+        if locked:
+            for w in fields:
+                w.setEnabled(False)
+            self._btn_scan.setEnabled(False)
+            self._btn_stop_scan.setEnabled(True)
+            self._sync_guide_pulse()
+            return
+        syncing = self._rsync.is_syncing()
+        for w in fields:
+            w.setEnabled(not syncing)
+        if syncing:
+            self._btn_scan.setEnabled(False)
+            self._btn_stop_scan.setEnabled(False)
+        else:
+            self._btn_scan.setEnabled(True)
+            self._btn_stop_scan.setEnabled(False)
+        self._sync_guide_pulse()
+
+    def _get_guide_target(self) -> Optional[QPushButton]:
+        if self._rsync.is_syncing():
+            return None
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            return None
+        src_remote, _ = self._parsed_source()
+        dst_remote, _ = self._parsed_destination()
+        src = self._source.text().strip()
+        dst = self._dest.text().strip()
+        # 1) Local source path must exist — Browse helps; remote source is typed (no pulse).
+        if src_remote is None:
+            if not src or not Path(src).expanduser().is_dir():
+                return self._btn_browse
+            if self._last_scan[1] is None:
+                return self._btn_scan
+        elif not src:
+            return None
+        # 2) Destination path
+        if not dst:
+            return self._btn_browse_dest
+        # 3) Any remote endpoint — confirm SSH before space check / sync.
+        if (src_remote is not None or dst_remote is not None) and not self._ssh_ok_this_session:
+            return self._btn_ssh
+        # 4) Remote destination: check free space once (local dest skips this guided step).
+        if dst_remote is not None and self._dest_free_bytes is None:
+            return self._btn_space
+        return self._btn_start
+
+    def _clear_guide_glow(self, w: Optional[QPushButton]) -> None:
+        if not w:
+            return
+        w.setProperty("guidePulse", False)
+        w.style().unpolish(w)
+        w.style().polish(w)
+        w.update()
+
+    @Slot()
+    def _sync_guide_pulse(self) -> None:
+        busy = self._rsync.is_syncing() or (
+            self._scan_thread is not None and self._scan_thread.isRunning()
+        )
+        if busy:
+            self._guide_pulse_timer.stop()
+            self._guide_glow_phase = 0
+            self._clear_guide_glow(self._guide_target)
+            self._guide_target = None
+            return
+        if not self._guide_pulse_timer.isActive():
+            self._guide_glow_phase = 0
+            self._guide_pulse_timer.start()
+        self._pulse_guide()
+
+    @Slot()
+    def _pulse_guide(self) -> None:
+        target = self._get_guide_target()
+        if target != self._guide_target:
+            self._clear_guide_glow(self._guide_target)
+            self._guide_target = target
+        if not target or not target.isEnabled():
+            self._guide_pulse_timer.stop()
+            self._clear_guide_glow(self._guide_target)
+            self._guide_target = None
+            return
+        self._guide_glow_phase = 1 - self._guide_glow_phase
+        target.setProperty("guidePulse", bool(self._guide_glow_phase))
+        target.style().unpolish(target)
+        target.style().polish(target)
+        target.update()
 
     def _preflight_warnings(self) -> bool:
         """Return True if user accepts or no blocking issue."""
@@ -1279,6 +1460,7 @@ class MainWindow(QWidget):
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._set_path_and_rsync_controls_enabled(False)
+        self._sync_guide_pulse()
         self._sync_panel_starting()
 
         try:
@@ -1297,6 +1479,7 @@ class MainWindow(QWidget):
             self._btn_start.setEnabled(True)
             self._btn_stop.setEnabled(False)
             self._reset_sync_transfer_panel()
+            self._sync_guide_pulse()
             QMessageBox.critical(self, "Sync", str(e))
             self._append_log(f"Sync setup error: {e}")
 
@@ -1316,6 +1499,7 @@ class MainWindow(QWidget):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._set_path_and_rsync_controls_enabled(True)
+        self._sync_guide_pulse()
         if ok:
             self._sync_progress_timer.stop()
             self._stop_sync_session_wall_clock(reset_label=False)
@@ -1356,6 +1540,7 @@ class MainWindow(QWidget):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._set_path_and_rsync_controls_enabled(True)
+        self._sync_guide_pulse()
         self._sync_progress_timer.stop()
         self._stop_sync_session_wall_clock(reset_label=False)
         self._pending_sync_snap = None
@@ -1364,6 +1549,36 @@ class MainWindow(QWidget):
         self._progress.setFormat("%p%")
         self._sync_bar_peak = 0
         self._lbl_sync_detail.setText("Stopped by user.")
+
+    @Slot()
+    def _check_for_update(self) -> None:
+        latest = fetch_latest_github_version()
+        if latest is None:
+            QMessageBox.information(
+                self,
+                "Check for update",
+                "Could not contact GitHub or read the latest release. "
+                "Check your network connection and try again.",
+            )
+            return
+        cur = __version__
+        if not is_remote_version_newer(cur, latest):
+            QMessageBox.information(
+                self,
+                "Check for update",
+                f"You are running SafeCopi {cur}.\n\n"
+                f"The latest GitHub release is {latest}.\n\n"
+                "No newer version is available.",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Update available",
+            f"You are running SafeCopi {cur}.\n\n"
+            f"A newer GitHub release is available: {latest}.\n\n"
+            "Visit the project page to download the latest version:\n"
+            "https://github.com/UnDadFeated/SafeCopi",
+        )
 
 
 def run_app() -> int:

@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.5.10] - 2026-04-07
+
+### Changed
+
+- **Guide pulse**: use a uniform **2px** push-button border so the pulse only toggles border **color** (no layout shift). Guided order: source **Browse** (local path missing/invalid) → **Scan source** (local tree not yet scanned) → destination **Browse** → **Test SSH** when either path is remote (cleared when source or destination text changes) → **Dest. space** for **remote destinations** until free space is known → **Start sync**. Empty **remote** source no longer highlights source **Browse**.
+
+## [1.5.9] - 2026-04-06
+
+### Added
+
+- **Guide pulse**: adopted the red blinking button guide pattern (from ChronoArchiver) to highlight the next action in idle state: **Browse** (missing local source), **Scan source** (local source unscanned), **Destination Browse** (empty destination), then **Start sync**. Pulse pauses during active scans/syncs and never forces disabled buttons to appear active.
+
+## [1.5.8] - 2026-04-06
+
+### Added
+
+- **Check for update**: Button next to **Copy log** / **Save log** that queries the latest GitHub release and compares its tag against the running `__version__`, reporting when a newer version is available.
+
+## [1.5.7] - 2026-04-06
+
+### Changed
+
+- **Layout**: **Preflight** and **File transfer** share one row (**~25% / ~75%** horizontal split), with action buttons on the full width below, to reduce empty vertical space. Preflight form spacing is slightly tighter for the narrow column.
+
+## [1.5.6] - 2026-04-06
+
+### Changed
+
+- **Source scan**: While **Scan source** is running, **Start sync**, path fields, **Browse**, SSH passwords, **Rsync** options, **Test SSH**, and **Dest. space** are disabled (same idea as during sync). **Stop scan** remains available until the walk ends or cancel completes.
+- **Layout**: **Scan source** and **Stop scan** sit in the **center** of the action row, with **Test SSH** / **Dest. space** on the left and **Start sync** / **Stop** on the right (equal stretch on both sides of the scan pair).
+
+## [1.5.5] - 2026-04-06
+
+### Changed
+
+- **Transfer bar**: When a **preflight source scan** total is available, fill and percent follow **bytes sent ÷ scanned size** only (rsync’s internal % is not mixed in). Without a scan, the bar still follows rsync’s overall percent.
+- **Bar label**: Shows **bytes remaining** vs the scan total (estimated from rsync % until cumulative **sent** appears on progress lines), current **speed**, and **ETA** computed as **remaining ÷ parsed speed** when speed parses; otherwise rsync’s ETA is shown. **finishing…** when the run is essentially done (including zero remaining vs scan). If rsync sends far less than the scanned total (e.g. incremental sync), the bar may stay below 100% until the process exits successfully.
+
+### Added
+
+- **`parse_rsync_speed_to_bytes_per_sec`**, **`format_seconds_as_hms_display`** in `utils` for ETA math and display.
+
 ## [1.5.4] - 2026-04-06
 
 ### Changed

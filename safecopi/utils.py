@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shlex
 import time
+import json
 import shutil
 import subprocess
 import sys
@@ -13,6 +15,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 _ASKPASS_WRAPPER: Optional[Path] = None
 
@@ -414,6 +418,60 @@ def format_rsync_hms_for_display(s: str) -> str:
     return f"{h}:{mi:02d}:{se:02d}"
 
 
+def format_seconds_as_hms_display(total_sec: float) -> str:
+    """
+    Format a non-negative duration in seconds using the same width rules as
+    :func:`format_rsync_hms_for_display`.
+    """
+    if math.isnan(total_sec) or math.isinf(total_sec):
+        return "—"
+    sec = int(round(max(0.0, total_sec)))
+    h, r = divmod(sec, 3600)
+    m, s = divmod(r, 60)
+    if h < 100:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def parse_rsync_speed_to_bytes_per_sec(tok: str) -> Optional[float]:
+    """
+    Parse rsync progress speed tokens (e.g. ``12.50MiB/s``, ``165.68MB/s``, ``0.00kB/s``)
+    into bytes per second. Uses 1024-based steps to match rsync’s human-readable sizes.
+    """
+    t = tok.strip()
+    if not t:
+        return None
+    tl = t.lower()
+    if len(tl) < 3 or tl[-2:] != "/s":
+        return None
+    core = t[:-2].strip()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([A-Za-z]*)$", core)
+    if not m:
+        return None
+    val = float(m.group(1))
+    raw_u = m.group(2).strip()
+    if not raw_u:
+        return val
+    u = raw_u.lower()
+    while len(u) > 1 and u.endswith("b"):
+        u = u[:-1]
+    mult = {
+        "k": 1024,
+        "ki": 1024,
+        "m": 1024**2,
+        "mi": 1024**2,
+        "g": 1024**3,
+        "gi": 1024**3,
+        "t": 1024**4,
+        "ti": 1024**4,
+        "p": 1024**5,
+        "pi": 1024**5,
+    }
+    if u not in mult:
+        return None
+    return val * mult[u]
+
+
 def parse_extra_rsync_args(line: str) -> List[str]:
     """
     Split a user-entered argument line using POSIX shell rules (``shlex.split``).
@@ -427,6 +485,59 @@ def parse_extra_rsync_args(line: str) -> List[str]:
         return shlex.split(s, posix=True)
     except ValueError as e:
         raise ValueError("Unbalanced or invalid quotes in extra rsync arguments.") from e
+
+
+def _parse_semver_triplet(version: str) -> Tuple[int, int, int]:
+    """
+    Best-effort parse of ``MAJOR.MINOR.PATCH`` (optionally prefixed with ``v`` and
+    optionally suffixed with pre-release / build metadata).
+    """
+    core = version.strip()
+    if core.startswith(("v", "V")):
+        core = core[1:]
+    for sep in ("+", "-"):
+        if sep in core:
+            core = core.split(sep, 1)[0]
+            break
+    parts = core.split(".")
+    nums: List[int] = []
+    for p in parts[:3]:
+        try:
+            nums.append(int(p))
+        except ValueError:
+            nums.append(0)
+    while len(nums) < 3:
+        nums.append(0)
+    return nums[0], nums[1], nums[2]
+
+
+def is_remote_version_newer(current: str, remote: str) -> bool:
+    """Return True if ``remote`` is a newer SemVer triplet than ``current``."""
+    return _parse_semver_triplet(remote) > _parse_semver_triplet(current)
+
+
+def fetch_latest_github_version(owner: str = "UnDadFeated", repo: str = "SafeCopi") -> Optional[str]:
+    """
+    Return the latest tagged version from GitHub releases, or None on error.
+
+    Uses the public ``/releases/latest`` endpoint and reads ``tag_name``. Network and
+    JSON errors are swallowed; callers should treat ``None`` as "could not check".
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    req = Request(url, headers={"User-Agent": "SafeCopi update check"})
+    try:
+        with urlopen(req, timeout=5) as resp:  # type: ignore[call-arg]
+            data = resp.read()
+    except (URLError, HTTPError, OSError, ValueError):
+        return None
+    try:
+        payload = json.loads(data.decode("utf-8", errors="replace"))
+    except (TypeError, ValueError):
+        return None
+    tag = payload.get("tag_name") or payload.get("name")
+    if not isinstance(tag, str) or not tag.strip():
+        return None
+    return tag.strip()
 
 
 def build_rsync_command_argv(

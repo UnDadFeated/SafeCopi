@@ -57,6 +57,7 @@ Or use the launcher (after `chmod +x run-safecopi` once):
 7. **Include subdirectories (recursive)** is on by default (`-ah` / full tree). Turn it off to sync only the top level of the source folder (rsync without `-r`).
 8. **Partial transfers**: choose **Resume (--partial)** to continue interrupted files, or **Re-copy interrupted files (no --partial)** so a failed file is removed and copied again from the start on the next run.
 9. Remote syncs pass explicit `ssh` options via `rsync -e` so behavior matches **Test SSH** (including `PubkeyAuthentication=no` so password auth can run when keys are not used).
+10. During sync, **overall progress** (`--info=progress2` plus size/speed lines) updates the transfer panel; the log omits per-file paths and routine progress chatter so errors and milestones stay visible (`--info=name0` and stderr filtering).
 
 ## Testing (optional)
 
@@ -67,4 +68,4 @@ QT_QPA_PLATFORM=offscreen .venv/bin/pytest tests/
 
 ## Version
 
-Current version: **1.4.0** (see `safecopi/__init__.py` and `CHANGELOG.md`).
+Current version: **1.4.1** (see `safecopi/__init__.py` and `CHANGELOG.md`).

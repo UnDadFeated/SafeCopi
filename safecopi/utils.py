@@ -417,6 +417,8 @@ def build_rsync_command_argv(
     traversed.
 
     ``extra_args`` are inserted before ``-v`` and the source/destination paths.
+    ``--info=name0`` suppresses per-file name lines on stderr while keeping
+    ``progress2`` and high-level messages.
     """
     t = max(1, int(timeout_sec))
     if recursive:
@@ -427,6 +429,8 @@ def build_rsync_command_argv(
         "rsync",
         *mode,
         "--info=progress2",
+        # Suppress per-file name lines on stderr (still get progress2 + errors).
+        "--info=name0",
         "--mkpath",
         f"--timeout={t}",
     ]
@@ -439,6 +443,13 @@ def build_rsync_command_argv(
 # Speed token varies: kB/s, KiB/s, MiB/s, GB/s, etc.
 _RSYNC_PROGRESS2_LINE = re.compile(
     r"^\s*(\d+:\d+:\d+)\s+(\d+)%\s+(\S+)\s+(\d+:\d+:\d+)"
+)
+
+# When rsync prints the current file on one line and stats on the next, the stats line is
+# often "SIZE  PCT  SPEED  ETA" (no leading elapsed), e.g.
+# "        206.50K   0%  165.68MB/s    0:00:00 (xfr#1, to-chk=295659/295662)"
+_RSYNC_PROGRESS_SIZE_FIRST = re.compile(
+    r"^\s*\S+\s+(\d+)%\s+(\S+/s)\s+(\d+:\d+:\d+)(?:\s+(\([^)]*\)))?\s*$"
 )
 
 
@@ -503,3 +514,75 @@ def parse_rsync_progress2_line(line: str) -> Optional[RsyncProgressSnapshot]:
             raw = line[li + 1 : ri].strip()
     human = humanize_rsync_progress_stats(raw)
     return RsyncProgressSnapshot(pct, elapsed, speed, eta, raw, human)
+
+
+def parse_rsync_transfer_progress_line(line: str) -> Optional[RsyncProgressSnapshot]:
+    """
+    Parse one stderr line from an rsync transfer: ``--info=progress2`` form first,
+    then the common ``SIZE  PCT  SPEED  ETA`` continuation line.
+    """
+    p2 = parse_rsync_progress2_line(line)
+    if p2 is not None:
+        return p2
+    m = _RSYNC_PROGRESS_SIZE_FIRST.match(line)
+    if not m:
+        return None
+    pct_s, speed, eta = m.group(1), m.group(2), m.group(3)
+    pct = max(0, min(100, int(pct_s)))
+    raw = ""
+    g4 = m.group(4)
+    if g4:
+        inner = g4.strip()
+        if inner.startswith("(") and inner.endswith(")"):
+            raw = inner[1:-1].strip()
+        else:
+            raw = inner
+    human = humanize_rsync_progress_stats(raw)
+    return RsyncProgressSnapshot(pct, "—", speed, eta, raw, human)
+
+
+def should_log_rsync_stderr_line(line: str) -> bool:
+    """
+    Return False for lines that would flood the UI log (paths, transfer stat noise).
+
+    Call only for lines that did not parse as transfer progress; progress-like lines
+    that failed to parse are still suppressed when they contain ``%`` and a ``/s`` speed.
+    """
+    s = line.strip()
+    if not s:
+        return False
+    low = s.lower()
+    needles = (
+        "building file list",
+        "receiving incremental file list",
+        "receiving file list",
+        "file list done",
+        "rsync:",
+        "sending incremental file list",
+        "sent ",
+        "total ",
+        "speedup is",
+        "created ",
+        "deleting",
+        "skipping",
+        "ignoring",
+        "warning",
+        "error",
+        "cannot",
+        "failed",
+        "timeout",
+        "connection",
+        "permission",
+        "denied",
+        "protocol",
+        "auth",
+    )
+    if any(n in low for n in needles):
+        return True
+    if s == "done" or s.startswith("done "):
+        return True
+    if "%" in s and "/s" in s:
+        return False
+    if "/" in s and "%" not in s and len(s) < 4096:
+        return False
+    return True

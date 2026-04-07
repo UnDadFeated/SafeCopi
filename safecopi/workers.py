@@ -18,8 +18,9 @@ from PySide6.QtCore import (
 
 from safecopi.utils import (
     build_rsync_command_argv,
-    parse_rsync_progress2_line,
+    parse_rsync_transfer_progress_line,
     scan_source_tree_stats,
+    should_log_rsync_stderr_line,
 )
 
 
@@ -251,10 +252,10 @@ class RsyncWorker(QObject):
             line = line.rstrip()
             if not line:
                 continue
-            snap = parse_rsync_progress2_line(line)
+            snap = parse_rsync_transfer_progress_line(line)
             if snap is not None:
                 self.progress.emit(snap)
-            else:
+            elif should_log_rsync_stderr_line(line):
                 self.log_line.emit(line)
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:

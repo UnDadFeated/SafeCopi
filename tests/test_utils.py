@@ -5,6 +5,8 @@ from safecopi.utils import (
     humanize_rsync_progress_stats,
     parse_extra_rsync_args,
     parse_rsync_progress2_line,
+    parse_rsync_transfer_progress_line,
+    should_log_rsync_stderr_line,
 )
 
 
@@ -40,6 +42,7 @@ def test_build_rsync_command_argv_order() -> None:
     assert argv[-2] == "/a"
     assert argv[-1] == "b:/c"
     assert argv[-3] == "-v"
+    assert "--info=name0" in argv
 
 
 def test_build_rsync_command_argv_non_recursive() -> None:
@@ -77,3 +80,36 @@ def test_humanize_ir_chk() -> None:
     h = humanize_rsync_progress_stats("xfr#0, ir-chk=1000/2855")
     assert "Transfer progress #0" in h
     assert "2,855" in h
+
+
+def test_parse_rsync_transfer_progress_line_size_first() -> None:
+    line = (
+        "        206.50K   0%  165.68MB/s    0:00:00 "
+        "(xfr#1, to-chk=295659/295662)"
+    )
+    s = parse_rsync_transfer_progress_line(line)
+    assert s is not None
+    assert s.percent == 0
+    assert s.elapsed == "—"
+    assert s.speed == "165.68MB/s"
+    assert s.eta == "0:00:00"
+    assert "295,659" in s.stats_human or "295659" in s.stats_raw
+
+
+def test_parse_rsync_transfer_progress_line_prefers_progress2() -> None:
+    line = "  0:00:01   3%  1.00MiB/s   0:05:00"
+    s = parse_rsync_transfer_progress_line(line)
+    assert s is not None
+    assert s.percent == 3
+    assert s.elapsed == "0:00:01"
+
+
+def test_should_log_rsync_stderr_line() -> None:
+    assert should_log_rsync_stderr_line("building file list ...")
+    assert should_log_rsync_stderr_line("created 1 directory for /tmp/foo/bar")
+    assert should_log_rsync_stderr_line("rsync: connection reset")
+    assert not should_log_rsync_stderr_line("Photos/JC1.jpg")
+    assert not should_log_rsync_stderr_line("Photos/subdir/")
+    assert not should_log_rsync_stderr_line(
+        "         32.77K   0%    0.00kB/s    0:00:00"
+    )

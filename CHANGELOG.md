@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.1] - 2026-04-06
+
+### Changed
+
+- **Rsync stderr**: pass `--info=name0` so rsync does not emit one line per transferred path; overall `progress2` and important messages remain.
+- **Transfer progress parsing**: `parse_rsync_transfer_progress_line()` accepts both standard `progress2` lines (elapsed-first) and the common `SIZE  PCT  SPEED  ETA` lines that follow a filename when `-v` is used.
+- **Activity log**: `RsyncWorker` emits log lines only when `should_log_rsync_stderr_line()` allows—paths and progress-looking noise are dropped after driving the progress bar.
+
 ## [1.4.0] - 2026-04-06
 
 ### Added

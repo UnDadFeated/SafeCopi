@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -19,11 +21,18 @@ from PySide6.QtCore import (
 )
 
 from safecopi.utils import (
+    RSYNC_RETRY_WAIT_SEC_MAX,
+    RSYNC_TIMEOUT_SEC_MAX,
     build_rsync_command_argv,
+    is_rsync_filename_only_stderr_line,
     parse_rsync_transfer_progress_line,
     scan_source_tree_stats,
     should_log_rsync_stderr_line,
 )
+
+# Bound memory if rsync emits huge chunks without newlines or a single gigantic “line”.
+_RSYNC_STREAM_BUFFER_MAX: int = 256 * 1024
+_RSYNC_IO_LINE_MAX_CHARS: int = 64 * 1024
 
 
 class SourceScanWorker(QObject):
@@ -121,6 +130,7 @@ class RsyncWorker(QObject):
         self._stderr_linebuf: str = ""
         self._transfer_os_paused: bool = False
         self._retry_paused: bool = False
+        self._last_transfer_path: str = ""
 
     def is_syncing(self) -> bool:
         return self._sync_active
@@ -139,7 +149,7 @@ class RsyncWorker(QObject):
         proc = self._process
         if proc is not None and proc.state() == QProcess.Running:
             pid = proc.processId()
-            if pid and hasattr(signal, "SIGSTOP"):
+            if pid and int(pid) > 0 and hasattr(signal, "SIGSTOP"):
                 try:
                     os.kill(int(pid), signal.SIGSTOP)
                     self._transfer_os_paused = True
@@ -167,7 +177,7 @@ class RsyncWorker(QObject):
             proc = self._process
             if proc is not None and proc.state() == QProcess.Running:
                 pid = proc.processId()
-                if pid and hasattr(signal, "SIGCONT"):
+                if pid and int(pid) > 0 and hasattr(signal, "SIGCONT"):
                     try:
                         os.kill(int(pid), signal.SIGCONT)
                         self._transfer_os_paused = False
@@ -198,8 +208,16 @@ class RsyncWorker(QObject):
     ) -> None:
         self._source = source
         self._dest = dest
-        self._timeout_sec = max(1, timeout_sec)
-        self._retry_wait_sec = max(1, retry_wait_sec)
+        try:
+            to = int(timeout_sec)
+        except (TypeError, ValueError):
+            to = 60
+        try:
+            rw = int(retry_wait_sec)
+        except (TypeError, ValueError):
+            rw = 15
+        self._timeout_sec = max(1, min(to, RSYNC_TIMEOUT_SEC_MAX))
+        self._retry_wait_sec = max(1, min(rw, RSYNC_RETRY_WAIT_SEC_MAX))
         self._extra_args = list(extra_args or [])
         self._recursive = recursive
         self._attempt = 1
@@ -215,7 +233,7 @@ class RsyncWorker(QObject):
         self._stop_requested = True
         if self._transfer_os_paused and self._process and self._process.state() != QProcess.NotRunning:
             pid = self._process.processId()
-            if pid and hasattr(signal, "SIGCONT"):
+            if pid and int(pid) > 0 and hasattr(signal, "SIGCONT"):
                 try:
                     os.kill(int(pid), signal.SIGCONT)
                 except OSError:
@@ -277,6 +295,7 @@ class RsyncWorker(QObject):
         )
         self._stdout_linebuf = ""
         self._stderr_linebuf = ""
+        self._last_transfer_path = ""
 
         if self._process is not None:
             old = self._process
@@ -330,19 +349,42 @@ class RsyncWorker(QObject):
         )
 
     def _feed_line_buffer(self, buf_attr: str, chunk: str) -> None:
-        merged = getattr(self, buf_attr) + chunk
-        lines = merged.split("\n")
-        setattr(self, buf_attr, lines[-1])
-        for line in lines[:-1]:
-            self._handle_rsync_io_line(line.rstrip())
+        buf = getattr(self, buf_attr) + chunk
+        while True:
+            nl = buf.find("\n")
+            if nl >= 0:
+                self._handle_rsync_io_line(buf[:nl].rstrip())
+                buf = buf[nl + 1 :]
+                continue
+            if len(buf) > _RSYNC_STREAM_BUFFER_MAX:
+                self.log_line.emit(
+                    "[SafeCopi] Cleared rsync output stuck without newline "
+                    f"({len(buf) // 1024} KiB); pipe may be binary or corrupted."
+                )
+                buf = ""
+            break
+        setattr(self, buf_attr, buf)
 
     def _handle_rsync_io_line(self, line: str) -> None:
         """Progress lines update the transfer UI only; everything else is filter-logged."""
         if not line:
             return
+        if len(line) > _RSYNC_IO_LINE_MAX_CHARS:
+            self.log_line.emit(
+                "[SafeCopi] Ignored overlong rsync line "
+                f"({len(line) // 1024} KiB)."
+            )
+            return
         snap = parse_rsync_transfer_progress_line(line)
         if snap is not None:
+            path = self._last_transfer_path.strip() or None
+            if path:
+                snap = replace(snap, current_path=path)
             self.progress.emit(snap)
+        elif is_rsync_filename_only_stderr_line(line):
+            raw = line.strip()
+            m = re.match(r"^[>][^\s]+\s+(.+)$", raw)
+            self._last_transfer_path = m.group(1).strip() if m else raw
         elif should_log_rsync_stderr_line(line):
             self.log_line.emit(line)
 

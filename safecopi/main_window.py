@@ -62,6 +62,9 @@ from safecopi.utils import (
 from safecopi.workers import RsyncWorker, SourceScanWorker
 
 
+_LOG_LINE_MAX_CHARS: int = 12_000
+
+
 class MainWindow(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -357,8 +360,14 @@ class MainWindow(QWidget):
         cbl.setContentsMargins(5, 5, 5, 5)
         self._rsync_preview = QPlainTextEdit()
         self._rsync_preview.setReadOnly(True)
-        self._rsync_preview.setMaximumBlockCount(4)
-        self._rsync_preview.setFixedHeight(36)
+        self._rsync_preview.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self._rsync_preview.setMinimumHeight(96)
+        self._rsync_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self._rsync_preview.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         pf = QFont("monospace")
         pf.setStyleHint(QFont.Monospace)
@@ -413,7 +422,7 @@ class MainWindow(QWidget):
         root.addWidget(opts)
         root.addWidget(preflight_transfer_row)
         root.addLayout(actions)
-        root.addWidget(cmd_box)
+        root.addWidget(cmd_box, stretch=1)
 
         log_btns = QHBoxLayout()
         log_btns.setSpacing(6)
@@ -434,7 +443,7 @@ class MainWindow(QWidget):
         log_btns.addWidget(self._btn_check_update)
         root.addLayout(log_btns)
 
-        root.addWidget(self._log, stretch=1)
+        root.addWidget(self._log, stretch=2)
 
         self._apply_style()
 
@@ -773,6 +782,12 @@ class MainWindow(QWidget):
             return f"{h:02d}:{m:02d}:{s:02d}"
         return f"{h}:{m:02d}:{s:02d}"
 
+    @staticmethod
+    def _shorten_transfer_path_for_ui(path: str, max_len: int = 88) -> str:
+        if len(path) <= max_len:
+            return path
+        return "…" + path[-(max_len - 1) :]
+
     def _stop_sync_session_wall_clock(self, *, reset_label: bool = False) -> None:
         self._sync_session_wall_timer.stop()
         if self._sync_session_active:
@@ -816,6 +831,11 @@ class MainWindow(QWidget):
 
     @Slot()
     def _flush_sync_transfer_ui(self) -> None:
+        # Progress uses QueuedConnection; the last progress update can be delivered after
+        # sync_finished (process exit) has already set the bar to 100 %. Ignore stale flushes.
+        if not self._rsync.is_syncing():
+            self._pending_sync_snap = None
+            return
         snap = self._pending_sync_snap
         if snap is None:
             return
@@ -873,6 +893,9 @@ class MainWindow(QWidget):
             parts.append(human_bytes(snap.transferred_bytes))
         if snap.stats_human:
             parts.append(snap.stats_human)
+        cp = (snap.current_path or "").strip()
+        if cp:
+            parts.append(self._shorten_transfer_path_for_ui(cp))
         parts.append(f"Attempt {self._sync_attempt_shown}")
         self._lbl_sync_detail.setText(" · ".join(parts))
 
@@ -880,12 +903,16 @@ class MainWindow(QWidget):
     def _on_rsync_progress(self, snap: object) -> None:
         if not isinstance(snap, RsyncProgressSnapshot):
             return
+        if not self._rsync.is_syncing():
+            return
         self._pending_sync_snap = snap
         self._sync_progress_timer.start(80)
 
     def _append_log(self, line: str) -> None:
         sb = self._log.verticalScrollBar()
         for segment in line.splitlines():
+            if len(segment) > _LOG_LINE_MAX_CHARS:
+                segment = segment[:_LOG_LINE_MAX_CHARS] + " … [truncated]"
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._log.appendPlainText(f"[{ts}] {segment}")
         sb.setValue(sb.maximum())
@@ -1490,7 +1517,7 @@ class MainWindow(QWidget):
                 recursive=self._recursive_subdirs.isChecked(),
             )
             self._rsync.start_sync_loop()
-        except OSError as e:
+        except Exception as e:  # noqa: BLE001
             self._set_path_and_rsync_controls_enabled(True)
             self._btn_start.setEnabled(True)
             self._btn_pause.setText("Pause")
@@ -1503,6 +1530,18 @@ class MainWindow(QWidget):
 
     @Slot()
     def _stop_sync(self) -> None:
+        if not self._rsync.is_syncing():
+            return
+        r = QMessageBox.question(
+            self,
+            "Stop sync",
+            "Stop the running sync? The current rsync attempt will be aborted; "
+            "partial files depend on your “Partial files” option and retries.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if r != QMessageBox.Yes:
+            return
         self._rsync.stop()
 
     @Slot()
@@ -1536,8 +1575,9 @@ class MainWindow(QWidget):
         self._sync_guide_pulse()
         if ok:
             self._sync_progress_timer.stop()
-            self._stop_sync_session_wall_clock(reset_label=False)
             self._pending_sync_snap = None
+            self._sync_bar_peak = 10_000
+            self._stop_sync_session_wall_clock(reset_label=False)
             self._progress.setRange(0, 10_000)
             self._progress.setValue(10_000)
             self._progress.setFormat("100.00\u0025 · complete")

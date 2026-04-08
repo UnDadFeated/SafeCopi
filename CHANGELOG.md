@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.5.16] - 2026-04-07
+
+### Changed
+
+- **Layout**: **Command preview** uses more vertical space (minimum height, expanding policy, word wrap, no block-count cap) and shares flexible height with the activity log at a 1∶2 ratio so long rsync argument lists stay visible; the log receives proportionally less of the remaining window height.
+
+## [1.5.15] - 2026-04-07
+
+### Fixed
+
+- **Progress bar after successful sync**: Transfer ``progress`` slots use ``Qt.QueuedConnection``, so the final progress update could be delivered **after** ``sync_finished`` had already set the bar to 100 %, restoring a partial value (e.g. ~81 % when byte-based progress lagged the source scan total on incremental runs). Progress coalescing and pending snapshots are now ignored once the sync session is no longer active; the monotonic peak is set to full scale on success.
+
+## [1.5.14] - 2026-04-07
+
+### Added
+
+- **Fail-safe guards**: bounded rsync stdout/stderr assembly (drop stuck buffers without newlines; skip overlong lines), clamped ``--timeout`` in ``build_rsync_command_argv``, sane limits and coercion for worker timeout/retry delays, validation caps on **Extra rsync arguments** length and token count, optional PID checks before **SIGSTOP** / **SIGCONT** / **kill**, log line truncation before appending, a confirmation dialog before **Stop** during sync, and broader exception handling during sync startup.
+
+## [1.5.13] - 2026-04-07
+
+### Fixed
+
+- **Rsync stderr classification**: Treat lines containing ``/`` as probable paths **before** applying substring needles such as ``deleting``, ``error``, or ``auth``. Previously, legitimate paths like ``backup/deleting/photo.jpg`` were logged to the activity panel and were not used for the transfer detail line.
+
+## [1.5.12] - 2026-04-07
+
+### Changed
+
+- **File transfer detail line**: The current transfer path (from rsync ``-v`` stderr) is shown before **Attempt**, so size-first progress lines without parenthetical stats still identify the active file. Default rsync argv no longer passes ``--info=name0`` (names were suppressed); use **Extra rsync arguments** with ``--info=name0`` to restore the previous stderr volume if needed.
+
 ## [1.5.11] - 2026-04-07
 
 ### Added

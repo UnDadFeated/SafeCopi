@@ -3,11 +3,14 @@
 import pytest
 
 from safecopi.utils import (
+    EXTRA_RSYNC_ARG_COUNT_MAX,
+    EXTRA_RSYNC_ARG_LINE_MAX_CHARS,
     build_rsync_command_argv,
     format_rsync_hms_for_display,
     format_seconds_as_hms_display,
     human_bytes,
     humanize_rsync_progress_stats,
+    is_rsync_filename_only_stderr_line,
     parse_extra_rsync_args,
     parse_rsync_progress2_line,
     parse_rsync_speed_to_bytes_per_sec,
@@ -40,6 +43,16 @@ def test_parse_extra_rsync_args_bad_quotes() -> None:
         raise AssertionError("expected ValueError")
 
 
+def test_parse_extra_rsync_args_line_too_long() -> None:
+    with pytest.raises(ValueError, match="exceed"):
+        parse_extra_rsync_args("x" * (EXTRA_RSYNC_ARG_LINE_MAX_CHARS + 1))
+
+
+def test_parse_extra_rsync_args_too_many_tokens() -> None:
+    with pytest.raises(ValueError, match="exceed"):
+        parse_extra_rsync_args(" ".join("x" for _ in range(EXTRA_RSYNC_ARG_COUNT_MAX + 1)))
+
+
 def test_build_rsync_command_argv_order() -> None:
     argv = build_rsync_command_argv("/a", "b:/c", 30, ["--dry-run", "-e", "ssh -S none"])
     assert argv[0] == "rsync"
@@ -50,7 +63,17 @@ def test_build_rsync_command_argv_order() -> None:
     assert argv[-2] == "/a"
     assert argv[-1] == "b:/c"
     assert argv[-3] == "-v"
-    assert "--info=name0" in argv
+    assert "--info=name0" not in argv
+
+
+def test_build_rsync_command_argv_caps_timeout() -> None:
+    argv = build_rsync_command_argv("/a", "b:/c", 999_999, [])
+    assert "--timeout=86400" in argv
+
+
+def test_build_rsync_command_argv_bad_timeout_defaults() -> None:
+    argv = build_rsync_command_argv("/a", "b:/c", "not-int", [])
+    assert "--timeout=60" in argv
 
 
 def test_build_rsync_command_argv_non_recursive() -> None:
@@ -154,12 +177,29 @@ def test_human_bytes_si() -> None:
     assert "TB" in human_bytes(3 * 10**12)
 
 
+def test_is_rsync_filename_only_stderr_line() -> None:
+    assert is_rsync_filename_only_stderr_line("Photos/JC1.jpg")
+    assert is_rsync_filename_only_stderr_line("Makefile")
+    assert is_rsync_filename_only_stderr_line(">f+++++++++ deep/file.xyz")
+    assert is_rsync_filename_only_stderr_line("dir/with space/name.txt")
+    # Path segments must not be confused with substring needles (deleting, error, auth, …).
+    assert is_rsync_filename_only_stderr_line("archive/deleting/old/img.jpg")
+    assert is_rsync_filename_only_stderr_line("logs/error/2024/debug.txt")
+    assert is_rsync_filename_only_stderr_line("etc/auth/tokens/secret.db")
+    assert not is_rsync_filename_only_stderr_line("rsync: foo")
+    assert not is_rsync_filename_only_stderr_line(
+        "        206.50K   0%  165.68MB/s    0:00:00 (xfr#1, to-chk=1/2)"
+    )
+    assert not is_rsync_filename_only_stderr_line("plain english sentence here")
+
+
 def test_should_log_rsync_stderr_line() -> None:
     assert should_log_rsync_stderr_line("building file list ...")
     assert should_log_rsync_stderr_line("created 1 directory for /tmp/foo/bar")
     assert should_log_rsync_stderr_line("rsync: connection reset")
     assert not should_log_rsync_stderr_line("Photos/JC1.jpg")
     assert not should_log_rsync_stderr_line("Photos/subdir/")
+    assert not should_log_rsync_stderr_line("archive/deleting/old/img.jpg")
     assert not should_log_rsync_stderr_line(
         "         32.77K   0%    0.00kB/s    0:00:00"
     )

@@ -20,6 +20,12 @@ from urllib.error import URLError, HTTPError
 
 _ASKPASS_WRAPPER: Optional[Path] = None
 
+# Upper bounds for user-supplied rsync knobs (match UI where applicable; clamp API callers too).
+RSYNC_TIMEOUT_SEC_MAX: int = 86400
+RSYNC_RETRY_WAIT_SEC_MAX: int = 3600
+EXTRA_RSYNC_ARG_LINE_MAX_CHARS: int = 32_768
+EXTRA_RSYNC_ARG_COUNT_MAX: int = 512
+
 # user@host:/path or host:/path — path may contain colons rarely; first : after host is separator
 _RSYNC_REMOTE = re.compile(
     r"^(?:(?P<user>[^@]+)@)?(?P<host>[^:]+):(?P<path>.+)$"
@@ -476,15 +482,24 @@ def parse_extra_rsync_args(line: str) -> List[str]:
     """
     Split a user-entered argument line using POSIX shell rules (``shlex.split``).
 
-    Raises ``ValueError`` if quotes are unbalanced.
+    Raises ``ValueError`` if quotes are unbalanced, or if the line or token count is excessive.
     """
     s = line.strip()
     if not s:
         return []
+    if len(s) > EXTRA_RSYNC_ARG_LINE_MAX_CHARS:
+        raise ValueError(
+            f"Extra rsync arguments exceed {EXTRA_RSYNC_ARG_LINE_MAX_CHARS} characters."
+        )
     try:
-        return shlex.split(s, posix=True)
+        parts = shlex.split(s, posix=True)
     except ValueError as e:
         raise ValueError("Unbalanced or invalid quotes in extra rsync arguments.") from e
+    if len(parts) > EXTRA_RSYNC_ARG_COUNT_MAX:
+        raise ValueError(
+            f"Extra rsync arguments exceed {EXTRA_RSYNC_ARG_COUNT_MAX} tokens."
+        )
+    return parts
 
 
 def _parse_semver_triplet(version: str) -> Tuple[int, int, int]:
@@ -557,10 +572,16 @@ def build_rsync_command_argv(
     traversed.
 
     ``extra_args`` are inserted before ``-v`` and the source/destination paths.
-    ``--info=name0`` suppresses per-file name lines on stderr while keeping
-    ``progress2`` and high-level messages.
+
+    Per-file path lines are emitted on stderr (with ``-v``) so the UI can show the
+    active filename next to ``Attempt``; add ``--info=name0`` via **Extra rsync
+    arguments** if that volume is undesirable.
     """
-    t = max(1, int(timeout_sec))
+    try:
+        t_raw = int(timeout_sec)
+    except (TypeError, ValueError):
+        t_raw = 60
+    t = max(1, min(t_raw, RSYNC_TIMEOUT_SEC_MAX))
     if recursive:
         mode = ["-ah", "--no-inc-recursive"]
     else:
@@ -569,8 +590,6 @@ def build_rsync_command_argv(
         "rsync",
         *mode,
         "--info=progress2",
-        # Suppress per-file name lines on stderr (still get progress2 + errors).
-        "--info=name0",
         "--mkpath",
         f"--timeout={t}",
     ]
@@ -609,6 +628,8 @@ class RsyncProgressSnapshot:
     # From size-first progress lines: cumulative bytes transferred (parsed) and raw token for UI.
     transferred_bytes: Optional[int] = None
     transferred_display: Optional[str] = None
+    # Last stderr path line before this progress update (verbatim, for the transfer detail line).
+    current_path: Optional[str] = None
 
 
 def _format_rsync_count_ratio(chunk: str) -> str:
@@ -732,6 +753,91 @@ def parse_rsync_transfer_progress_line(line: str) -> Optional[RsyncProgressSnaps
     )
 
 
+def _rsync_stderr_line_is_probable_file_path(line: str) -> bool:
+    """
+    True when ``line`` is almost certainly a lone transferred path from rsync ``-v``,
+    not a status/error sentence.
+
+    Substring needles like ``deleting`` or ``error`` must **not** be applied to lines
+    that contain ``/``, or legitimate directories such as ``backup/deleting/foo.jpg``
+    are misclassified and skipped for the transfer detail line while the activity log
+    shows noise.
+    """
+    s = line.strip()
+    if not s or len(s) >= 4096:
+        return False
+    low = s.lower()
+    if low.startswith("rsync:"):
+        return False
+    rest_star = s.lstrip("*").lower()
+    if s.startswith("*") and rest_star.startswith("deleting"):
+        return False
+
+    if re.match(r"^[>][^\s]+\s+", s):
+        return True
+
+    if "/" in s:
+        if "%" in s:
+            return False
+        if low.startswith(
+            (
+                "building file list",
+                "receiving incremental file list",
+                "receiving file list",
+                "sending incremental file list",
+                "file list done",
+            )
+        ) or low.startswith("file list "):
+            return False
+        if (
+            low.startswith("created ")
+            or low.startswith("sent ")
+            or low.startswith("total ")
+            or low.startswith("speedup is")
+        ):
+            return False
+        if low.startswith("cannot ") or low.startswith("warning:") or low.startswith("warning "):
+            return False
+        if low.startswith("error:") or low.startswith("error "):
+            return False
+        if low.startswith("skipping ") or low.startswith("ignoring "):
+            return False
+        if low.startswith("failed ") or low.startswith("timeout ") or low.startswith("connection "):
+            return False
+        if low.startswith("permission denied") or low.startswith("protocol "):
+            return False
+        return True
+
+    if " " not in s and len(s) <= 512:
+        return True
+    return False
+
+
+def is_rsync_filename_only_stderr_line(line: str) -> bool:
+    """
+    True for a lone path/name line from rsync ``-v`` stderr (not progress, not status).
+
+    Used to track the file being transferred without logging every path to the activity log.
+    """
+    s = line.strip()
+    if not s or len(s) >= 4096:
+        return False
+    if parse_rsync_transfer_progress_line(line) is not None:
+        return False
+    low = s.lower()
+    if s == "done" or s.startswith("done "):
+        return False
+    if "%" in s and "/s" in s:
+        return False
+    if "xfr#" in low or "to-chk" in low or "ir-chk" in low:
+        return False
+    if " " in s and "/" not in s:
+        # Itemized changes: ">f.st.... path" (path may lack '/').
+        if not re.match(r"^[>][^\s]+\s+", s):
+            return False
+    return _rsync_stderr_line_is_probable_file_path(line)
+
+
 def should_log_rsync_stderr_line(line: str) -> bool:
     """
     Return False for lines that would flood the UI log (paths, transfer stat noise).
@@ -741,6 +847,10 @@ def should_log_rsync_stderr_line(line: str) -> bool:
     """
     s = line.strip()
     if not s:
+        return False
+    if "%" in s and "/s" in s:
+        return False
+    if _rsync_stderr_line_is_probable_file_path(line):
         return False
     low = s.lower()
     needles = (
@@ -772,8 +882,4 @@ def should_log_rsync_stderr_line(line: str) -> bool:
         return True
     if s == "done" or s.startswith("done "):
         return True
-    if "%" in s and "/s" in s:
-        return False
-    if "/" in s and "%" not in s and len(s) < 4096:
-        return False
     return True

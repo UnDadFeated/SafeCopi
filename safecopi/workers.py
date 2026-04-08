@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -99,6 +101,7 @@ class RsyncWorker(QObject):
     attempt_changed = Signal(int)
     sync_finished = Signal(int, bool)  # last_exit_code, success
     stopped_by_user = Signal()
+    transfer_pause_state_changed = Signal(bool)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -116,9 +119,72 @@ class RsyncWorker(QObject):
         self._env: Optional[QProcessEnvironment] = None
         self._stdout_linebuf: str = ""
         self._stderr_linebuf: str = ""
+        self._transfer_os_paused: bool = False
+        self._retry_paused: bool = False
 
     def is_syncing(self) -> bool:
         return self._sync_active
+
+    def is_transfer_paused(self) -> bool:
+        return self._transfer_os_paused or self._retry_paused
+
+    def pause_transfer(self) -> bool:
+        """
+        Suspend the running rsync (POSIX SIGSTOP) or hold the next retry until :meth:`resume_transfer`.
+
+        Returns True if a pause was applied.
+        """
+        if not self._sync_active or self._stop_requested:
+            return False
+        proc = self._process
+        if proc is not None and proc.state() == QProcess.Running:
+            pid = proc.processId()
+            if pid and hasattr(signal, "SIGSTOP"):
+                try:
+                    os.kill(int(pid), signal.SIGSTOP)
+                    self._transfer_os_paused = True
+                    self.log_line.emit("Paused — rsync suspended (SIGSTOP).")
+                    self.transfer_pause_state_changed.emit(True)
+                    return True
+                except OSError as e:
+                    self.log_line.emit(f"Pause failed: {e}")
+                    return False
+            self.log_line.emit("Pause not supported on this platform (no SIGSTOP).")
+            return False
+        if self._retry_timer is not None and self._retry_timer.isActive():
+            self._retry_timer.stop()
+            self._retry_paused = True
+            self.log_line.emit("Paused — next retry held until Resume.")
+            self.transfer_pause_state_changed.emit(True)
+            return True
+        return False
+
+    def resume_transfer(self) -> bool:
+        """Resume after :meth:`pause_transfer` (SIGCONT or reschedule retry)."""
+        if not self._sync_active or self._stop_requested:
+            return False
+        if self._transfer_os_paused:
+            proc = self._process
+            if proc is not None and proc.state() == QProcess.Running:
+                pid = proc.processId()
+                if pid and hasattr(signal, "SIGCONT"):
+                    try:
+                        os.kill(int(pid), signal.SIGCONT)
+                        self._transfer_os_paused = False
+                        self.log_line.emit("Resumed — rsync continued (SIGCONT).")
+                        self.transfer_pause_state_changed.emit(False)
+                        return True
+                    except OSError as e:
+                        self.log_line.emit(f"Resume failed: {e}")
+                        return False
+            self._transfer_os_paused = False
+        if self._retry_paused:
+            self._retry_paused = False
+            self._schedule_retry()
+            self.log_line.emit("Resumed — retry countdown restarted.")
+            self.transfer_pause_state_changed.emit(False)
+            return True
+        return False
 
     def configure(
         self,
@@ -138,6 +204,8 @@ class RsyncWorker(QObject):
         self._recursive = recursive
         self._attempt = 1
         self._stop_requested = False
+        self._transfer_os_paused = False
+        self._retry_paused = False
         self._cancel_retry_timer()
 
     def set_process_environment(self, env: QProcessEnvironment) -> None:
@@ -145,6 +213,16 @@ class RsyncWorker(QObject):
 
     def stop(self) -> None:
         self._stop_requested = True
+        if self._transfer_os_paused and self._process and self._process.state() != QProcess.NotRunning:
+            pid = self._process.processId()
+            if pid and hasattr(signal, "SIGCONT"):
+                try:
+                    os.kill(int(pid), signal.SIGCONT)
+                except OSError:
+                    pass
+        self._transfer_os_paused = False
+        self._retry_paused = False
+        self.transfer_pause_state_changed.emit(False)
         self._cancel_retry_timer()
         if self._process and self._process.state() != QProcess.NotRunning:
             # Do not block the GUI thread on waitForFinished(); let _on_finished clean up.
@@ -156,6 +234,8 @@ class RsyncWorker(QObject):
 
     def start_sync_loop(self) -> None:
         self._stop_requested = False
+        self._transfer_os_paused = False
+        self._retry_paused = False
         self._cancel_retry_timer()
         self._sync_active = True
         self._attempt = 1
@@ -180,6 +260,8 @@ class RsyncWorker(QObject):
         self._retry_timer = None
         if t is not None:
             t.deleteLater()
+        if self._retry_paused:
+            return
         self._run_one_attempt()
 
     def _run_one_attempt(self) -> None:
@@ -285,6 +367,8 @@ class RsyncWorker(QObject):
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         self._flush_io_line_buffers()
+        self._transfer_os_paused = False
+        self.transfer_pause_state_changed.emit(self.is_transfer_paused())
         proc = self._process
         self._process = None
         if proc is not None:

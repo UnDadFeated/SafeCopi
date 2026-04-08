@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.11] - 2026-04-07
+
+### Added
+
+- **Pause** / **Resume** between **Start sync** and **Stop**: suspends the running rsync on POSIX via **SIGSTOP** / **SIGCONT**, or holds the next **retry** countdown until resumed. **Stop** still terminates the sync (SIGCONT before kill when needed).
+
 ## [1.5.10] - 2026-04-07
 
 ### Changed

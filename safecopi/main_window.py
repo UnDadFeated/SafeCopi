@@ -211,6 +211,13 @@ class MainWindow(QWidget):
         self._btn_stop_scan.clicked.connect(self._stop_scan)
         self._btn_start = QPushButton("Start sync")
         self._btn_start.clicked.connect(self._start_sync)
+        self._btn_pause = QPushButton("Pause")
+        self._btn_pause.setToolTip(
+            "Suspend the running rsync (POSIX SIGSTOP) or hold the next retry. "
+            "Use Resume to continue. Stop still terminates the sync."
+        )
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.clicked.connect(self._toggle_sync_pause)
         self._btn_stop = QPushButton("Stop")
         self._btn_stop.clicked.connect(self._stop_sync)
         self._btn_stop.setEnabled(False)
@@ -377,6 +384,7 @@ class MainWindow(QWidget):
             self._btn_scan,
             self._btn_stop_scan,
             self._btn_start,
+            self._btn_pause,
             self._btn_stop,
         ):
             b.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -387,6 +395,7 @@ class MainWindow(QWidget):
         actions.addWidget(self._btn_stop_scan, 0)
         actions.addStretch(1)
         actions.addWidget(self._btn_start, 0)
+        actions.addWidget(self._btn_pause, 0)
         actions.addWidget(self._btn_stop, 0)
 
         preflight_transfer_row = QWidget()
@@ -436,6 +445,9 @@ class MainWindow(QWidget):
         self._rsync.log_line.connect(self._append_log)
         self._rsync.progress.connect(self._on_rsync_progress, Qt.QueuedConnection)
         self._rsync.attempt_changed.connect(self._on_attempt)
+        self._rsync.transfer_pause_state_changed.connect(
+            self._on_rsync_pause_state_changed, Qt.QueuedConnection
+        )
         self._rsync.sync_finished.connect(self._on_sync_finished)
         self._rsync.stopped_by_user.connect(self._on_stopped)
 
@@ -720,6 +732,8 @@ class MainWindow(QWidget):
     def _reset_sync_transfer_panel(self) -> None:
         self._sync_progress_timer.stop()
         self._stop_sync_session_wall_clock(reset_label=True)
+        self._btn_pause.setText("Pause")
+        self._btn_pause.setEnabled(False)
         self._pending_sync_snap = None
         self._sync_attempt_shown = 1
         self._progress.setRange(0, 100)
@@ -1458,6 +1472,8 @@ class MainWindow(QWidget):
 
         self._last_sync_was_dry_run = self._dry_run.isChecked()
         self._btn_start.setEnabled(False)
+        self._btn_pause.setText("Pause")
+        self._btn_pause.setEnabled(True)
         self._btn_stop.setEnabled(True)
         self._set_path_and_rsync_controls_enabled(False)
         self._sync_guide_pulse()
@@ -1477,6 +1493,8 @@ class MainWindow(QWidget):
         except OSError as e:
             self._set_path_and_rsync_controls_enabled(True)
             self._btn_start.setEnabled(True)
+            self._btn_pause.setText("Pause")
+            self._btn_pause.setEnabled(False)
             self._btn_stop.setEnabled(False)
             self._reset_sync_transfer_panel()
             self._sync_guide_pulse()
@@ -1487,16 +1505,32 @@ class MainWindow(QWidget):
     def _stop_sync(self) -> None:
         self._rsync.stop()
 
+    @Slot()
+    def _toggle_sync_pause(self) -> None:
+        if self._btn_pause.text() == "Pause":
+            if self._rsync.pause_transfer():
+                self._btn_pause.setText("Resume")
+        else:
+            if self._rsync.resume_transfer():
+                self._btn_pause.setText("Pause")
+
     @Slot(int)
     def _on_attempt(self, n: int) -> None:
         self._sync_attempt_shown = n
         self._append_log(f"--- Attempt {n} ---")
+        self._btn_pause.setText("Pause")
+
+    @Slot(bool)
+    def _on_rsync_pause_state_changed(self, paused: bool) -> None:
+        self._btn_pause.setText("Resume" if paused else "Pause")
 
     @Slot(int, bool)
     def _on_sync_finished(self, code: int, ok: bool) -> None:
         was_dry = self._last_sync_was_dry_run
         self._last_sync_was_dry_run = False
         self._btn_start.setEnabled(True)
+        self._btn_pause.setText("Pause")
+        self._btn_pause.setEnabled(False)
         self._btn_stop.setEnabled(False)
         self._set_path_and_rsync_controls_enabled(True)
         self._sync_guide_pulse()
@@ -1538,6 +1572,8 @@ class MainWindow(QWidget):
     def _on_stopped(self) -> None:
         self._last_sync_was_dry_run = False
         self._btn_start.setEnabled(True)
+        self._btn_pause.setText("Pause")
+        self._btn_pause.setEnabled(False)
         self._btn_stop.setEnabled(False)
         self._set_path_and_rsync_controls_enabled(True)
         self._sync_guide_pulse()

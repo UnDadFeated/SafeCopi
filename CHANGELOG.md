@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.6.1] - 2026-04-07
+
+### Added
+
+- **Safeguards**: refuse **Start sync** when the destination field is empty; cap the source list at **64** folders (add, load from settings, and persist). **Add folder** skips duplicates that resolve to the same local path (trailing slash variants).
+
+### Changed
+
+- **Guide pulse** highlights **Remove** when multiple sources mix local and remote paths (unsupported configuration).
+- **Remove** tooltip notes that mixed multi-source lists are invalid.
+
+### Fixed
+
+- **RsyncWorker** aborts an attempt cleanly if a source path normalizes to empty instead of invoking rsync with invalid arguments.
+
+## [1.6.0] - 2026-04-07
+
+### Added
+
+- **Multiple local source folders**: **Source** is a list with **Add folder…** / **Remove**. Each folder is synced into the destination under its own top-level name (``rsync`` without a trailing slash on the source path, plus ``--mkpath`` on the destination). Runs are sequential in one session; the progress bar resets between sources. **Scan source** sums all listed trees for preflight totals.
+
+### Changed
+
+- **If file exists** default is **Skip (if name and size is same)** (``--size-only``) for safer first-time behavior. Legacy settings key ``default`` now maps to that mode (previously matched overwrite-style behavior).
+- Multiple sources require **all-local** paths; a single **user@host:/path** source remains supported alone.
+
+## [1.5.18] - 2026-04-07
+
+### Changed
+
+- **If file exists** dropdown reduced to three options: **Skip (if name and size is same)** (``--size-only``), **Skip (if only name is same)** (``--ignore-existing``), and **Overwrite** (no extra flag). Older saved mode keys map to the closest new value.
+
+## [1.5.17] - 2026-04-07
+
+### Added
+
+- **Rsync** form: **If file exists** dropdown (persisted) mapping to standard rsync policies: default update-when-different, ``--update`` / ``-u`` (keep newer destination files), ``--ignore-existing``, ``--inplace``, ``--backup``, and ``--existing``. Logic lives in ``utils`` with unit tests; flags are inserted before **Extra args** (tooltip warns against duplicates there).
+
 ## [1.5.16] - 2026-04-07
 
 ### Changed

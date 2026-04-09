@@ -49,10 +49,17 @@ class SourceScanWorker(QObject):
         super().__init__(parent)
         self._cancel = threading.Event()
         self._source_path = ""
+        self._source_paths: Optional[List[str]] = None
 
     def prepare_source(self, source_path: str) -> None:
         """Set the tree to scan; call before ``thread.start()`` and the slot ``run()``."""
         self._source_path = source_path
+        self._source_paths = None
+
+    def prepare_sources(self, paths: List[str]) -> None:
+        """Scan several local trees; sums file counts and bytes. Mutually exclusive with ``prepare_source``."""
+        self._source_paths = list(paths)
+        self._source_path = ""
 
     def request_cancel(self) -> None:
         """Request cooperative cancellation (checked between files during the walk)."""
@@ -61,8 +68,56 @@ class SourceScanWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            source_path = self._source_path
             self._cancel.clear()
+            multi = self._source_paths
+            if multi is not None:
+                npaths = len(multi)
+                if npaths == 0:
+                    self.failed.emit("No source folders to scan.")
+                    return
+                self.phase.emit(
+                    f"Walking {npaths} source folders — summing file sizes (can be slow on mounts)."
+                )
+                self.scan_progress.emit(0, 0)
+                total_c, total_b = 0, 0
+                for i, source_path in enumerate(multi):
+                    if self._cancel.is_set():
+                        self.finished.emit(total_c, total_b, True)
+                        return
+                    path = Path(source_path).expanduser()
+                    if not path.is_dir():
+                        self.failed.emit(f"Source is not a directory: {source_path}")
+                        return
+                    self.phase.emit(
+                        f"Scanning folder {i + 1}/{npaths}: {source_path}"
+                    )
+                    tc_snap, tbb_snap = total_c, total_b
+
+                    def _on_prog(n: int, tb_local: int) -> None:
+                        self.scan_progress.emit(tc_snap + n, tbb_snap + tb_local)
+
+                    try:
+                        count, size_part = scan_source_tree_stats(
+                            str(path),
+                            on_progress=_on_prog,
+                            should_cancel=lambda: self._cancel.is_set(),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self.failed.emit(str(e))
+                        return
+                    if count is None:
+                        self.failed.emit(
+                            "Could not read the source tree (permissions or I/O error)."
+                        )
+                        return
+                    total_c += count
+                    total_b += size_part
+                    self.scan_progress.emit(total_c, total_b)
+                was_cancelled = self._cancel.is_set()
+                self.finished.emit(total_c, total_b, was_cancelled)
+                return
+
+            source_path = self._source_path
             path = Path(source_path).expanduser()
             if not path.is_dir():
                 self.failed.emit(f"Source is not a directory: {source_path}")
@@ -73,8 +128,8 @@ class SourceScanWorker(QObject):
             self.scan_progress.emit(0, 0)
             try:
 
-                def _on_prog(n: int, total_b: int) -> None:
-                    self.scan_progress.emit(n, total_b)
+                def _on_prog(n: int, total_bytes: int) -> None:
+                    self.scan_progress.emit(n, total_bytes)
 
                 count, size_b = scan_source_tree_stats(
                     str(path),
@@ -108,6 +163,8 @@ class RsyncWorker(QObject):
     log_line = Signal(str)
     progress = Signal(object)  # RsyncProgressSnapshot from utils
     attempt_changed = Signal(int)
+    # Multi-source sync: 1-based index and total runs (emit on first attempt of each source only).
+    source_run_changed = Signal(int, int)
     sync_finished = Signal(int, bool)  # last_exit_code, success
     stopped_by_user = Signal()
     transfer_pause_state_changed = Signal(bool)
@@ -119,7 +176,9 @@ class RsyncWorker(QObject):
         self._stop_requested = False
         self._sync_active = False
         self._attempt = 1
-        self._source = ""
+        self._sources: List[str] = []
+        self._source_index = 0
+        self._multi_source = False
         self._dest = ""
         self._timeout_sec = 60
         self._retry_wait_sec = 15
@@ -198,7 +257,7 @@ class RsyncWorker(QObject):
 
     def configure(
         self,
-        source: str,
+        sources: List[str],
         dest: str,
         timeout_sec: int,
         retry_wait_sec: int,
@@ -206,8 +265,12 @@ class RsyncWorker(QObject):
         *,
         recursive: bool = True,
     ) -> None:
-        self._source = source
-        self._dest = dest
+        self._sources = [s.strip() for s in sources if s.strip()]
+        if not self._sources:
+            self._sources = [""]
+        self._multi_source = len(self._sources) > 1
+        self._source_index = 0
+        self._dest = dest.strip()
         try:
             to = int(timeout_sec)
         except (TypeError, ValueError):
@@ -257,6 +320,7 @@ class RsyncWorker(QObject):
         self._cancel_retry_timer()
         self._sync_active = True
         self._attempt = 1
+        self._source_index = 0
         self._run_one_attempt()
 
     def _cancel_retry_timer(self) -> None:
@@ -290,8 +354,23 @@ class RsyncWorker(QObject):
             return
 
         self.attempt_changed.emit(self._attempt)
+        src_line = self._sources[self._source_index]
+        if self._multi_source and self._attempt == 1:
+            self.source_run_changed.emit(self._source_index + 1, len(self._sources))
+        tag = (
+            f"source {self._source_index + 1}/{len(self._sources)} · "
+            if self._multi_source
+            else ""
+        )
+        argv_src = src_line.rstrip("/") if self._multi_source and src_line.strip() else src_line
+        if not (argv_src or "").strip():
+            self.log_line.emit("ERROR: empty source path — check the source list.")
+            self._sync_active = False
+            self.sync_finished.emit(-1, False)
+            return
         self.log_line.emit(
-            f"[Attempt {self._attempt}] rsync → {self._dest} (timeout={self._timeout_sec}s)"
+            f"[Attempt {self._attempt}] {tag}{argv_src} → {self._dest} "
+            f"(timeout={self._timeout_sec}s)"
         )
         self._stdout_linebuf = ""
         self._stderr_linebuf = ""
@@ -318,7 +397,7 @@ class RsyncWorker(QObject):
         self._process.finished.connect(self._on_finished)
 
         argv = build_rsync_command_argv(
-            self._source,
+            argv_src,
             self._dest,
             self._timeout_sec,
             self._extra_args,
@@ -434,6 +513,14 @@ class RsyncWorker(QObject):
             self.log_line.emit("rsync terminated abnormally.")
 
         if code == 0:
+            if self._multi_source and self._source_index + 1 < len(self._sources):
+                self.log_line.emit(
+                    f"Finished source {self._source_index + 1}/{len(self._sources)}."
+                )
+                self._source_index += 1
+                self._attempt = 1
+                self._run_one_attempt()
+                return
             self.log_line.emit("Sync completed successfully.")
             self._sync_active = False
             self.sync_finished.emit(0, True)

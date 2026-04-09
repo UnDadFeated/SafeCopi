@@ -12,7 +12,7 @@ Desktop application for **synchronizing local directories to remote hosts** over
 
 ## Overview
 
-SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script. **Preflight** and **File transfer** sit **side by side** (~¼ / ~¾ width) to save vertical space. Paths use monospace fields with browse buttons; **Src.** / **Dest. password** fields appear inline when that side is a remote `user@host:/path`.
+SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script. **Preflight** and **File transfer** sit **side by side** (~¼ / ~¾ width) to save vertical space. **Source** can be several local folders (each copied under the destination by folder name); **Destination** uses a monospace field with browse; **Src.** / **Dest. password** appear when that side is remote (`user@host:/path`).
 
 Session fields—including paths, dry-run, recursion, bandwidth limit, and extra rsync arguments—persist via `QSettings`. SSH password fields are **never** written to disk. The activity log records **timestamps** on each line; during sync, **session elapsed** wall time appears under the transfer progress bar.
 
@@ -23,7 +23,7 @@ Session fields—including paths, dry-run, recursion, bandwidth limit, and extra
 - **Preflight** — Walk the source tree for file count and total size (incremental UI updates for slow or network-backed paths). While a scan runs, path fields, rsync options, **Test SSH**, **Dest. space**, and **Start sync** are disabled; **Scan source** / **Stop scan** are centered in the action row. An idle red guide pulse (fixed-width border, no layout jump) steps through **Browse** / **Scan** / destination **Browse**, then **Test SSH** and **Dest. space** when the workflow needs them, then **Start sync**.
 - **Remote space** — Query free space with `df` over SSH, walking to parent paths when the destination directory does not exist yet.
 - **SSH** — Password-capable transport for **source and/or destination** remotes (`PubkeyAuthentication=no` when a password is supplied; `SSH_ASKPASS` / optional `sshpass`). **Test SSH** checks the destination host if remote, else the source host.
-- **Sync** — Builds rsync argv centrally (`--info=progress2`, timeouts, archive-style modes); per-file path lines stay on stderr (with `-v`) so the transfer detail line can show the active file before **Attempt**. Add `--info=name0` under **Extra rsync arguments** to suppress those paths if preferred. Worker loop retries on non-zero exit until success or user stop. **Pause** / **Resume** (between **Start sync** and **Stop**) suspends the running rsync on POSIX (**SIGSTOP** / **SIGCONT**) or defers the next retry until resumed. Path fields, rsync options, **Test SSH**, **Dest. space**, and **Scan source** are disabled for the duration of a run (including between retries); **Start sync** is also disabled during an active **Scan source** run.
+- **Sync** — Builds rsync argv centrally (`--info=progress2`, timeouts, archive-style modes); **If file exists** defaults to skip when name and size match (`--size-only`), with overwrite or skip-by-name (`--ignore-existing`) as alternatives. Multiple **local** sources run as separate rsyncs into the same destination root (each folder name appears under the target); at most **64** source folders are kept (settings load/save and **Add folder** enforce the cap). If the list mixes local paths with a remote `user@host:/path` entry, the guide pulse highlights **Remove** until the configuration is valid. Per-file path lines stay on stderr (with `-v`) so the transfer detail line can show the active file before **Attempt**. Add `--info=name0` under **Extra rsync arguments** to suppress those paths if preferred. Worker loop retries on non-zero exit until success or user stop. **Pause** / **Resume** (between **Start sync** and **Stop**) suspends the running rsync on POSIX (**SIGSTOP** / **SIGCONT**) or defers the next retry until resumed. Path fields, rsync options, **Test SSH**, **Dest. space**, and **Scan source** are disabled for the duration of a run (including between retries); **Start sync** is also disabled during an active **Scan source** run.
 - **Progress** — Parsed rsync progress drives a 0..10000 bar with a rich label (%, **bytes left** vs the last **source scan** total when available, speed, **ETA** from remaining÷throughput or rsync’s ETA); the bar follows **sent ÷ scanned size** when a preflight scan exists, else rsync’s overall percent. The bar is **monotonic** (not per-file `xfr#`, still in the detail line). Progress and per-file path lines from rsync drive the transfer panel; path spam stays out of the activity log.
 
 ---
@@ -81,11 +81,11 @@ Or, after `chmod +x run-safecopi`:
 
 ## Usage
 
-1. **Source** — Local directory (including mounted NAS paths).
+1. **Source** — One or more **local** folders (**Add folder…**); with several entries, each is synced as `dest/FolderName/…`. A single **user@host:/path** remote source is still allowed (not combinable with extra list entries).
 2. **Destination** — Rsync-style URI, e.g. `user@host:/mnt/backup/Archive/`.
-3. **Trailing slash** — Rsync semantics differ for `path` vs `path/`; the UI calls this out.
+3. **Trailing slash** — Rsync semantics differ for `path` vs `path/`; the hint under Preflight still applies to paths you type.
 4. **Check destination space** — Recommended before large runs.
-5. **Scan source** — Optional; counts files and sums sizes with periodic UI updates (~250 files or ~200 ms). Totals reflect `getsize` sums (may differ slightly from `du` for sparse or special files).
+5. **Scan source** — Optional; walks all listed local folders and **sums** counts/sizes, with periodic UI updates (~250 files or ~200 ms). Totals reflect `getsize` sums (may differ slightly from `du` for sparse or special files).
 6. **Dry run** — Adds `--dry-run` (no writes).
 7. **Subdirectories** — Recursive copy (`-ah`) is default; disabling limits to the top level (`-hlptgoD` without `-r`).
 8. **Partial files** — Choose resume (`--partial`) or full re-copy of interrupted files on the next run.

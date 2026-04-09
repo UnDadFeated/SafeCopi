@@ -502,6 +502,58 @@ def parse_extra_rsync_args(line: str) -> List[str]:
     return parts
 
 
+# UI: policy when the destination already has a path (one rsync modifier set, or none).
+EXISTING_FILES_MODE_DEFAULT: str = "skip_name_size"
+
+_EXISTING_FILES_MODE_ARGV: Dict[str, List[str]] = {
+    "overwrite": [],
+    # Same path on dest with matching size → skip (rsync does not compare mtime for this check).
+    "skip_name_size": ["--size-only"],
+    # Same path exists on dest → skip regardless of size.
+    "skip_name": ["--ignore-existing"],
+}
+
+# Older settings keys map onto the simplified modes.
+_LEGACY_EXISTING_FILES_MODE_MAP: Dict[str, str] = {
+    "default": "skip_name_size",
+    "update": "overwrite",
+    "inplace": "overwrite",
+    "backup": "overwrite",
+    "existing_only": "overwrite",
+    "ignore_existing": "skip_name",
+}
+
+# (label shown in combo box, mode key for settings / :func:`existing_files_mode_rsync_argv`).
+EXISTING_FILES_MODE_CHOICES: List[Tuple[str, str]] = [
+    ("Skip (if name and size is same)", "skip_name_size"),
+    ("Skip (if only name is same)", "skip_name"),
+    ("Overwrite", "overwrite"),
+]
+
+
+def normalize_existing_files_mode(mode: Optional[str]) -> str:
+    """
+    Return a known mode key; unknown or empty values become ``EXISTING_FILES_MODE_DEFAULT``.
+
+    Legacy persisted keys (e.g. ``ignore_existing``, ``default``) are mapped to the new set.
+    """
+    if not isinstance(mode, str):
+        return EXISTING_FILES_MODE_DEFAULT
+    key = mode.strip()
+    if not key:
+        return EXISTING_FILES_MODE_DEFAULT
+    if key in _EXISTING_FILES_MODE_ARGV:
+        return key
+    if key in _LEGACY_EXISTING_FILES_MODE_MAP:
+        return _LEGACY_EXISTING_FILES_MODE_MAP[key]
+    return EXISTING_FILES_MODE_DEFAULT
+
+
+def existing_files_mode_rsync_argv(mode: Optional[str]) -> List[str]:
+    """Argv tokens for :class:`~safecopi.main_window.MainWindow` “existing files” policy."""
+    return list(_EXISTING_FILES_MODE_ARGV[normalize_existing_files_mode(mode)])
+
+
 def _parse_semver_triplet(version: str) -> Tuple[int, int, int]:
     """
     Best-effort parse of ``MAJOR.MINOR.PATCH`` (optionally prefixed with ``v`` and

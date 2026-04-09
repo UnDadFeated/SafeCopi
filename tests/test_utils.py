@@ -3,9 +3,12 @@
 import pytest
 
 from safecopi.utils import (
+    EXISTING_FILES_MODE_DEFAULT,
     EXTRA_RSYNC_ARG_COUNT_MAX,
     EXTRA_RSYNC_ARG_LINE_MAX_CHARS,
     build_rsync_command_argv,
+    existing_files_mode_rsync_argv,
+    normalize_existing_files_mode,
     format_rsync_hms_for_display,
     format_seconds_as_hms_display,
     human_bytes,
@@ -41,6 +44,23 @@ def test_parse_extra_rsync_args_bad_quotes() -> None:
         assert "quotes" in str(e).lower() or "Unbalanced" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_normalize_existing_files_mode() -> None:
+    assert EXISTING_FILES_MODE_DEFAULT == "skip_name_size"
+    assert normalize_existing_files_mode(None) == "skip_name_size"
+    assert normalize_existing_files_mode("") == "skip_name_size"
+    assert normalize_existing_files_mode("nope") == "skip_name_size"
+    assert normalize_existing_files_mode("skip_name_size") == "skip_name_size"
+    assert normalize_existing_files_mode("ignore_existing") == "skip_name"
+    assert normalize_existing_files_mode("default") == "skip_name_size"
+    assert normalize_existing_files_mode("overwrite") == "overwrite"
+
+
+def test_existing_files_mode_rsync_argv() -> None:
+    assert existing_files_mode_rsync_argv("overwrite") == []
+    assert existing_files_mode_rsync_argv("skip_name_size") == ["--size-only"]
+    assert existing_files_mode_rsync_argv("skip_name") == ["--ignore-existing"]
 
 
 def test_parse_extra_rsync_args_line_too_long() -> None:

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QCheckBox,
+    QComboBox,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -44,7 +46,11 @@ from safecopi import __version__
 from safecopi.utils import (
     RemoteTarget,
     RsyncProgressSnapshot,
+    EXISTING_FILES_MODE_CHOICES,
+    EXISTING_FILES_MODE_DEFAULT,
     build_rsync_command_argv,
+    existing_files_mode_rsync_argv,
+    normalize_existing_files_mode,
     ensure_ssh_askpass_wrapper,
     fetch_latest_github_version,
     format_rsync_hms_for_display,
@@ -63,6 +69,8 @@ from safecopi.workers import RsyncWorker, SourceScanWorker
 
 
 _LOG_LINE_MAX_CHARS: int = 12_000
+# Cap source folders to avoid accidental huge lists and argv explosion.
+_MAX_SOURCE_FOLDERS: int = 64
 
 
 class MainWindow(QWidget):
@@ -102,16 +110,35 @@ class MainWindow(QWidget):
         self._pending_sync_snap: Optional[RsyncProgressSnapshot] = None
         self._sync_attempt_shown = 1
         self._sync_bar_peak: int = 0
+        self._sync_rsync_source_step: int = 0
         self._rsync = RsyncWorker(self)
 
-        self._source = QLineEdit("/mnt/nas/Archive/")
+        self._source_list = QListWidget()
+        self._source_list.setObjectName("SourceList")
+        self._source_list.setMinimumHeight(56)
+        self._source_list.setMaximumHeight(104)
+        self._source_list.setToolTip(
+            "One or more source folders. With several local folders, each is copied into the "
+            "destination under its own name (e.g. A and B → dest/A/, dest/B/). "
+            "Multiple sources require local paths; a single remote user@host:/path is still allowed."
+        )
+        self._btn_add_source = QPushButton("Add folder…")
+        self._btn_remove_source = QPushButton("Remove")
+        self._btn_add_source.setMinimumHeight(28)
+        self._btn_remove_source.setMinimumHeight(28)
+        self._btn_add_source.setToolTip("Add a local source directory to the list.")
+        self._btn_remove_source.setToolTip(
+            "Remove the selected folder from the list. "
+            "Also use this when several sources mix local and remote paths (not supported)."
+        )
+        self._btn_add_source.clicked.connect(self._add_source_folder)
+        self._btn_remove_source.clicked.connect(self._remove_source_folder)
+
         self._dest = QLineEdit("htpc@192.168.4.112:/mnt/media_hdd/Backup/Archive/")
-        for pe in (self._source, self._dest):
-            pe.setObjectName("PathLineEdit")
-            pe.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            pe.setMinimumHeight(28)
-            pe.setClearButtonEnabled(True)
-        self._source.setPlaceholderText('"user@ip:/path" or "/path"')
+        self._dest.setObjectName("PathLineEdit")
+        self._dest.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._dest.setMinimumHeight(28)
+        self._dest.setClearButtonEnabled(True)
         self._dest.setPlaceholderText('"user@ip:/path" or "/path"')
         self._timeout = QSpinBox()
         self._timeout.setRange(10, 86400)
@@ -161,10 +188,6 @@ class MainWindow(QWidget):
             "first when set; otherwise the source password."
         )
 
-        self._btn_browse = QPushButton("Browse…")
-        self._btn_browse.setMinimumHeight(28)
-        self._btn_browse.setToolTip("Choose a local source directory.")
-        self._btn_browse.clicked.connect(self._browse_source)
         self._btn_browse_dest = QPushButton("Browse…")
         self._btn_browse_dest.setMinimumHeight(28)
         self._btn_browse_dest.setToolTip(
@@ -288,11 +311,22 @@ class MainWindow(QWidget):
         paths = QGroupBox("Paths")
         fl = QFormLayout(paths)
         self._compact_form(fl)
+        _src_col = QVBoxLayout()
+        _src_col.setSpacing(4)
+        _src_col.setContentsMargins(0, 0, 0, 0)
+        _src_col.addWidget(self._source_list, 1)
+        _src_btns = QHBoxLayout()
+        _src_btns.setSpacing(6)
+        _src_btns.addWidget(self._btn_add_source, 0)
+        _src_btns.addWidget(self._btn_remove_source, 0)
+        _src_btns.addStretch(1)
+        _src_col.addLayout(_src_btns)
+        _src_wrap = QWidget()
+        _src_wrap.setLayout(_src_col)
         row_src = QHBoxLayout()
         row_src.setSpacing(6)
         row_src.setContentsMargins(0, 0, 0, 0)
-        row_src.addWidget(self._source, 1)
-        row_src.addWidget(self._btn_browse, 0)
+        row_src.addWidget(_src_wrap, 1)
         row_src.addWidget(self._ssh_pw_src_wrap, 0)
         w_src = QWidget()
         w_src.setLayout(row_src)
@@ -339,6 +373,17 @@ class MainWindow(QWidget):
         partial_w = QWidget()
         partial_w.setLayout(partial_row)
         fo.addRow("Partial files", partial_w)
+
+        self._combo_existing_files = QComboBox()
+        self._combo_existing_files.setMinimumWidth(280)
+        for label, mode in EXISTING_FILES_MODE_CHOICES:
+            self._combo_existing_files.addItem(label, mode)
+        self._combo_existing_files.setToolTip(
+            "Overwrite: normal rsync (replace when the file differs). "
+            "Skip (name+size): --size-only. Skip (name): --ignore-existing. "
+            "Inserted before Extra args — avoid duplicating those flags there."
+        )
+        fo.addRow("If file exists", self._combo_existing_files)
 
         self._bwlimit = QSpinBox()
         self._bwlimit.setRange(0, 999_999)
@@ -459,6 +504,7 @@ class MainWindow(QWidget):
         )
         self._rsync.sync_finished.connect(self._on_sync_finished)
         self._rsync.stopped_by_user.connect(self._on_stopped)
+        self._rsync.source_run_changed.connect(self._on_rsync_source_run_changed)
 
         self._reset_sync_transfer_panel()
         self._sync_guide_pulse()
@@ -585,11 +631,9 @@ class MainWindow(QWidget):
         super().closeEvent(event)
 
     def _wire_settings_persistence(self) -> None:
-        for w in (self._source, self._dest, self._extra_rsync):
+        for w in (self._dest, self._extra_rsync):
             w.textChanged.connect(self._debounce_settings_and_preview)
-        self._source.textChanged.connect(self._on_paths_or_ssh_context_changed)
         self._dest.textChanged.connect(self._on_paths_or_ssh_context_changed)
-        self._source.textChanged.connect(self._update_ssh_password_visibility)
         self._dest.textChanged.connect(self._update_ssh_password_visibility)
         self._timeout.valueChanged.connect(self._debounce_settings_and_preview)
         self._retry.valueChanged.connect(self._debounce_settings_and_preview)
@@ -598,6 +642,9 @@ class MainWindow(QWidget):
         self._recursive_subdirs.toggled.connect(self._debounce_settings_and_preview)
         self._radio_resume_partial.toggled.connect(self._debounce_settings_and_preview)
         self._radio_redo_partial.toggled.connect(self._debounce_settings_and_preview)
+        self._combo_existing_files.currentIndexChanged.connect(
+            self._debounce_settings_and_preview
+        )
 
     @Slot()
     def _on_paths_or_ssh_context_changed(self) -> None:
@@ -615,13 +662,19 @@ class MainWindow(QWidget):
         if self._settings_loading:
             return
         s = QSettings("SafeCopi", "SafeCopi")
-        s.setValue("source", self._source.text())
+        plist = self._source_paths_list()[:_MAX_SOURCE_FOLDERS]
+        s.setValue("sources", plist)
         s.setValue("dest", self._dest.text())
         s.setValue("io_timeout", self._timeout.value())
         s.setValue("retry_delay", self._retry.value())
         s.setValue("dry_run", self._dry_run.isChecked())
         s.setValue("recursive_subdirs", self._recursive_subdirs.isChecked())
         s.setValue("partial_resume", self._radio_resume_partial.isChecked())
+        raw_m = self._combo_existing_files.currentData()
+        s.setValue(
+            "existing_files_mode",
+            normalize_existing_files_mode(raw_m if isinstance(raw_m, str) else ""),
+        )
         s.setValue("extra_rsync", self._extra_rsync.text())
         s.setValue("bwlimit", self._bwlimit.value())
         s.sync()
@@ -638,11 +691,63 @@ class MainWindow(QWidget):
             return default
         return max(lo, min(hi, v))
 
+    def _source_paths_list(self) -> List[str]:
+        out: List[str] = []
+        for i in range(self._source_list.count()):
+            it = self._source_list.item(i)
+            if it is not None:
+                t = it.text().strip()
+                if t:
+                    out.append(t)
+        return out
+
+    @staticmethod
+    def _source_path_dedup_key(path: str) -> str:
+        """Stable key to detect duplicate sources (resolved locals; normalized remote strings)."""
+        s = path.strip()
+        if not s:
+            return ""
+        remote, _ = parse_rsync_destination(s)
+        if remote is not None:
+            return s.rstrip("/") + "/"
+        try:
+            return str(Path(s).expanduser().resolve(strict=False)) + "/"
+        except OSError:
+            return s if s.endswith("/") else s + "/"
+
+    def _load_source_list_from_settings(self, s: QSettings) -> None:
+        self._source_list.clear()
+        raw = s.value("sources")
+        paths: List[str] = []
+        if isinstance(raw, list) and raw:
+            paths = [str(x).strip() for x in raw if str(x).strip()]
+        if not paths:
+            legacy = s.value("source", "", type=str).strip()
+            if legacy:
+                paths = [legacy]
+            else:
+                paths = ["/mnt/nas/Archive/"]
+        if len(paths) > _MAX_SOURCE_FOLDERS:
+            paths = paths[:_MAX_SOURCE_FOLDERS]
+        for p in paths:
+            self._source_list.addItem(p)
+
+    def _on_sources_mutation(self) -> None:
+        self._on_paths_or_ssh_context_changed()
+        self._update_ssh_password_visibility()
+        self._debounce_settings_and_preview()
+
+    def _all_sources_local(self) -> bool:
+        for p in self._source_paths_list():
+            if parse_rsync_destination(p)[0] is not None:
+                return False
+        return True
+
     def _load_settings_from_disk(self) -> None:
         self._settings_loading = True
         try:
             s = QSettings("SafeCopi", "SafeCopi")
-            self._source.setText(s.value("source", self._source.text(), type=str))
+            self._load_source_list_from_settings(s)
             self._dest.setText(s.value("dest", self._dest.text(), type=str))
             self._timeout.setValue(
                 self._settings_int(s, "io_timeout", self._timeout.value(), 10, 86400)
@@ -657,6 +762,13 @@ class MainWindow(QWidget):
             pr = s.value("partial_resume", self._radio_resume_partial.isChecked(), type=bool)
             self._radio_resume_partial.setChecked(pr)
             self._radio_redo_partial.setChecked(not pr)
+            stored_mode = normalize_existing_files_mode(
+                s.value("existing_files_mode", EXISTING_FILES_MODE_DEFAULT, type=str)
+            )
+            idx = self._combo_existing_files.findData(stored_mode)
+            if idx < 0:
+                idx = self._combo_existing_files.findData(EXISTING_FILES_MODE_DEFAULT)
+            self._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
             self._extra_rsync.setText(s.value("extra_rsync", "", type=str))
             self._bwlimit.setValue(self._settings_int(s, "bwlimit", 0, 0, 999_999))
         finally:
@@ -669,14 +781,37 @@ class MainWindow(QWidget):
         except ValueError as e:
             self._rsync_preview.setPlainText(f"(invalid extra args: {e})")
             return
-        argv = build_rsync_command_argv(
-            self._source.text().strip(),
-            self._dest.text().strip(),
-            self._timeout.value(),
-            self._collect_rsync_modifiers(),
-            recursive=self._recursive_subdirs.isChecked(),
-        )
-        self._rsync_preview.setPlainText(shlex.join(argv))
+        paths = self._source_paths_list()
+        dest = self._dest.text().strip()
+        if not paths:
+            self._rsync_preview.setPlainText("(add at least one source folder)")
+            return
+        if not dest:
+            self._rsync_preview.setPlainText("(set destination)")
+            return
+        mod = self._collect_rsync_modifiers()
+        rec = self._recursive_subdirs.isChecked()
+        to = self._timeout.value()
+        if len(paths) == 1:
+            argv = build_rsync_command_argv(paths[0], dest, to, mod, recursive=rec)
+            self._rsync_preview.setPlainText(shlex.join(argv))
+            return
+        lines = [
+            f"# {len(paths)} rsync runs — each folder is created under the destination:",
+            *(
+                shlex.join(
+                    build_rsync_command_argv(
+                        (p.rstrip("/") or p),
+                        dest,
+                        to,
+                        mod,
+                        recursive=rec,
+                    )
+                )
+                for p in paths
+            ),
+        ]
+        self._rsync_preview.setPlainText("\n".join(lines))
 
     def _parsed_user_extra_args(self) -> List[str]:
         return parse_extra_rsync_args(self._extra_rsync.text())
@@ -687,13 +822,18 @@ class MainWindow(QWidget):
             args.append("--partial")
         if self._dry_run.isChecked():
             args.append("--dry-run")
+        raw_m = self._combo_existing_files.currentData()
+        args.extend(
+            existing_files_mode_rsync_argv(
+                raw_m if isinstance(raw_m, str) else EXISTING_FILES_MODE_DEFAULT
+            )
+        )
         bw = self._bwlimit.value()
         if bw > 0:
             args.append(f"--bwlimit={bw}")
         args.extend(self._parsed_user_extra_args())
-        src_remote, _ = self._parsed_source()
         dst_remote, _rpath = self._parsed_destination()
-        if src_remote is not None or dst_remote is not None:
+        if self._ssh_source_is_remote() or dst_remote is not None:
             args.extend(
                 [
                     "-e",
@@ -763,6 +903,7 @@ class MainWindow(QWidget):
         self._progress.setFormat("Starting rsync…")
         self._sync_attempt_shown = 1
         self._sync_bar_peak = 0
+        self._sync_rsync_source_step = 0
         self._lbl_sync_detail.setText(
             "Waiting for the first progress line (can take a few seconds over SSH)."
         )
@@ -908,6 +1049,15 @@ class MainWindow(QWidget):
         self._pending_sync_snap = snap
         self._sync_progress_timer.start(80)
 
+    @Slot(int, int)
+    def _on_rsync_source_run_changed(self, step: int, total: int) -> None:
+        if total <= 1:
+            return
+        if step != self._sync_rsync_source_step:
+            self._sync_rsync_source_step = step
+            self._sync_bar_peak = 0
+            self._pending_sync_snap = None
+
     def _append_log(self, line: str) -> None:
         sb = self._log.verticalScrollBar()
         for segment in line.splitlines():
@@ -918,10 +1068,38 @@ class MainWindow(QWidget):
         sb.setValue(sb.maximum())
 
     @Slot()
-    def _browse_source(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select source directory", self._source.text())
-        if d:
-            self._source.setText(d if d.endswith("/") else d + "/")
+    def _add_source_folder(self) -> None:
+        if self._source_list.count() >= _MAX_SOURCE_FOLDERS:
+            QMessageBox.information(
+                self,
+                "Source list",
+                f"At most {_MAX_SOURCE_FOLDERS} source folders are supported.",
+            )
+            return
+        start = ""
+        paths = self._source_paths_list()
+        keys = {self._source_path_dedup_key(p) for p in paths}
+        if paths:
+            start = paths[-1]
+        elif self._dest.text().strip():
+            start = str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Add source folder", start)
+        if not d:
+            return
+        norm = d if d.endswith("/") else d + "/"
+        nk = self._source_path_dedup_key(norm)
+        if nk in keys:
+            return
+        self._source_list.addItem(norm)
+        self._on_sources_mutation()
+
+    @Slot()
+    def _remove_source_folder(self) -> None:
+        row = self._source_list.currentRow()
+        if row < 0:
+            return
+        self._source_list.takeItem(row)
+        self._on_sources_mutation()
 
     @Slot()
     def _browse_destination(self) -> None:
@@ -935,7 +1113,7 @@ class MainWindow(QWidget):
 
     @Slot()
     def _update_ssh_password_visibility(self) -> None:
-        self._ssh_pw_src_wrap.setVisible(self._parsed_source()[0] is not None)
+        self._ssh_pw_src_wrap.setVisible(self._ssh_source_is_remote())
         self._ssh_pw_wrap.setVisible(self._parsed_destination()[0] is not None)
 
     @Slot(str)
@@ -1018,7 +1196,12 @@ class MainWindow(QWidget):
             t.quit()
 
     def _parsed_source(self) -> Tuple[Optional[RemoteTarget], str]:
-        return parse_rsync_destination(self._source.text().strip())
+        for p in self._source_paths_list():
+            r, path = parse_rsync_destination(p)
+            if r is not None:
+                return r, path
+        paths = self._source_paths_list()
+        return (None, paths[0] if paths else "")
 
     def _parsed_destination(self) -> Tuple[Optional[RemoteTarget], str]:
         return parse_rsync_destination(self._dest.text().strip())
@@ -1030,7 +1213,10 @@ class MainWindow(QWidget):
         return self._parsed_destination()[0]
 
     def _ssh_source_is_remote(self) -> bool:
-        return self._parsed_source()[0] is not None
+        for p in self._source_paths_list():
+            if parse_rsync_destination(p)[0] is not None:
+                return True
+        return False
 
     def _ssh_destination_is_remote(self) -> bool:
         return self._parsed_destination()[0] is not None
@@ -1247,8 +1433,11 @@ class MainWindow(QWidget):
 
     @Slot()
     def _scan_source(self) -> None:
-        path = self._source.text().strip()
-        if self._parsed_source()[0] is not None:
+        paths = self._source_paths_list()
+        if not paths:
+            QMessageBox.warning(self, "Scan", "Add at least one source folder first.")
+            return
+        if not self._all_sources_local():
             QMessageBox.information(
                 self,
                 "Scan",
@@ -1256,10 +1445,15 @@ class MainWindow(QWidget):
                 "Remote sources (user@host:/path) are not walked from this app.",
             )
             return
-        p = Path(path).expanduser()
-        if not p.is_dir():
-            QMessageBox.warning(self, "Scan", "Source must be an existing local directory.")
-            return
+        for path in paths:
+            p = Path(path).expanduser()
+            if not p.is_dir():
+                QMessageBox.warning(
+                    self,
+                    "Scan",
+                    f"Source must be an existing local directory:\n{path}",
+                )
+                return
         if self._scan_thread and self._scan_thread.isRunning():
             QMessageBox.information(self, "Scan", "A scan is already running.")
             return
@@ -1268,7 +1462,12 @@ class MainWindow(QWidget):
         self._scan_pending_b = 0
         self._set_scan_source_interaction_locked(True)
         self._sync_guide_pulse()
-        self._append_log(f"Scanning source (may take a while): {path}")
+        if len(paths) == 1:
+            self._append_log(f"Scanning source (may take a while): {paths[0]}")
+        else:
+            self._append_log(
+                f"Scanning {len(paths)} source folders (may take a while): " + "; ".join(paths)
+            )
         self._lbl_files.setText("—")
         self._lbl_src_size.setText("…")
         self._lbl_scan_idle.setVisible(False)
@@ -1280,7 +1479,10 @@ class MainWindow(QWidget):
         worker.moveToThread(thread)
 
         self._scan_worker_ref = worker
-        worker.prepare_source(path)
+        if len(paths) == 1:
+            worker.prepare_source(paths[0])
+        else:
+            worker.prepare_sources(paths)
         thread.started.connect(worker.run)
         worker.phase.connect(self._on_scan_phase, Qt.QueuedConnection)
         worker.scan_progress.connect(self._on_scan_progress, Qt.QueuedConnection)
@@ -1298,11 +1500,12 @@ class MainWindow(QWidget):
     def _set_path_and_rsync_controls_enabled(self, enabled: bool) -> None:
         """Paths, rsync options, and preflight actions — disabled for the duration of a sync."""
         for w in (
-            self._source,
+            self._source_list,
+            self._btn_add_source,
+            self._btn_remove_source,
             self._dest,
             self._ssh_password_src,
             self._ssh_password,
-            self._btn_browse,
             self._btn_browse_dest,
             self._timeout,
             self._retry,
@@ -1310,6 +1513,7 @@ class MainWindow(QWidget):
             self._recursive_subdirs,
             self._radio_resume_partial,
             self._radio_redo_partial,
+            self._combo_existing_files,
             self._bwlimit,
             self._extra_rsync,
             self._btn_ssh,
@@ -1330,11 +1534,12 @@ class MainWindow(QWidget):
         change the session, and **Start sync**. **Stop scan** stays enabled until cancelled or done.
         """
         fields = (
-            self._source,
+            self._source_list,
+            self._btn_add_source,
+            self._btn_remove_source,
             self._dest,
             self._ssh_password_src,
             self._ssh_password,
-            self._btn_browse,
             self._btn_browse_dest,
             self._timeout,
             self._retry,
@@ -1342,6 +1547,7 @@ class MainWindow(QWidget):
             self._recursive_subdirs,
             self._radio_resume_partial,
             self._radio_redo_partial,
+            self._combo_existing_files,
             self._bwlimit,
             self._extra_rsync,
             self._btn_ssh,
@@ -1371,23 +1577,28 @@ class MainWindow(QWidget):
             return None
         if self._scan_thread is not None and self._scan_thread.isRunning():
             return None
-        src_remote, _ = self._parsed_source()
         dst_remote, _ = self._parsed_destination()
-        src = self._source.text().strip()
+        paths = self._source_paths_list()
         dst = self._dest.text().strip()
-        # 1) Local source path must exist — Browse helps; remote source is typed (no pulse).
-        if src_remote is None:
-            if not src or not Path(src).expanduser().is_dir():
-                return self._btn_browse
+        # Invalid combo: multiple entries with a remote path (sync will be rejected).
+        if len(paths) > 1 and not self._all_sources_local():
+            return self._btn_remove_source
+        # 1) Local sources must exist — Add folder helps; remote-only session is typed (no pulse).
+        if self._all_sources_local():
+            if not paths:
+                return self._btn_add_source
+            for p in paths:
+                if not Path(p).expanduser().is_dir():
+                    return self._btn_add_source
             if self._last_scan[1] is None:
                 return self._btn_scan
-        elif not src:
+        elif not paths:
             return None
         # 2) Destination path
         if not dst:
             return self._btn_browse_dest
         # 3) Any remote endpoint — confirm SSH before space check / sync.
-        if (src_remote is not None or dst_remote is not None) and not self._ssh_ok_this_session:
+        if (self._ssh_source_is_remote() or dst_remote is not None) and not self._ssh_ok_this_session:
             return self._btn_ssh
         # 4) Remote destination: check free space once (local dest skips this guided step).
         if dst_remote is not None and self._dest_free_bytes is None:
@@ -1437,11 +1648,30 @@ class MainWindow(QWidget):
 
     def _preflight_warnings(self) -> bool:
         """Return True if user accepts or no blocking issue."""
-        if self._parsed_source()[0] is None:
-            src = Path(self._source.text().strip()).expanduser()
-            if not src.is_dir():
-                QMessageBox.warning(self, "Sync", "Source directory does not exist.")
-                return False
+        paths = self._source_paths_list()
+        if not paths:
+            QMessageBox.warning(self, "Sync", "Add at least one source folder.")
+            return False
+        if not self._dest.text().strip():
+            QMessageBox.warning(self, "Sync", "Set a destination path.")
+            return False
+        if len(paths) > 1 and not self._all_sources_local():
+            QMessageBox.warning(
+                self,
+                "Sync",
+                "Multiple sources are only supported for local folders. "
+                "Use one remote source (user@host:/path) or remove extra list entries.",
+            )
+            return False
+        if self._all_sources_local():
+            for p in paths:
+                if not Path(p).expanduser().is_dir():
+                    QMessageBox.warning(
+                        self,
+                        "Sync",
+                        f"Source directory does not exist:\n{p}",
+                    )
+                    return False
 
         if self._dry_run.isChecked():
             return True
@@ -1484,10 +1714,16 @@ class MainWindow(QWidget):
             return
         if not self._dry_run.isChecked():
             dest = self._dest.text().strip()
+            nsrc = len(self._source_paths_list())
+            extra = (
+                f"\n\n{nsrc} source folders will each appear under this destination by name."
+                if nsrc > 1
+                else ""
+            )
             r = QMessageBox.question(
                 self,
                 "Start sync",
-                f"Start copying to:\n{dest}\n\nThe destination will be modified (not a dry run).",
+                f"Start copying to:\n{dest}{extra}\n\nThe destination will be modified (not a dry run).",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -1509,7 +1745,7 @@ class MainWindow(QWidget):
         try:
             self._rsync.set_process_environment(self._ssh_qprocess_env())
             self._rsync.configure(
-                self._source.text().strip(),
+                self._source_paths_list(),
                 self._dest.text().strip(),
                 self._timeout.value(),
                 self._retry.value(),

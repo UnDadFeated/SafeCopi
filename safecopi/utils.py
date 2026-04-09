@@ -571,6 +571,39 @@ def format_seconds_as_hms_display(total_sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}"
 
 
+def parse_rsync_eta_token_to_seconds(eta: str) -> Optional[float]:
+    """
+    Parse rsync ETA fields such as ``0:03:30``, ``34:08:53``, or ``102:05:03`` into seconds.
+
+    Returns ``None`` for empty, em dash, malformed tokens, or values outside a safe bound
+    (used only for UI estimates, not scheduling).
+    """
+    t = (eta or "").strip()
+    if not t or t == "—":
+        return None
+    parts = t.split(":")
+    try:
+        if len(parts) == 3:
+            h = float(parts[0])
+            m = float(parts[1])
+            sec = float(parts[2])
+        elif len(parts) == 2:
+            h = 0.0
+            m = float(parts[0])
+            sec = float(parts[1])
+        else:
+            return None
+    except ValueError:
+        return None
+    if h < 0 or m < 0 or m >= 60 or sec < 0 or sec >= 60:
+        return None
+    out = h * 3600.0 + m * 60.0 + sec
+    # Match plausible rsync ETAs; reject garbage that would imply absurd byte estimates.
+    if out < 0.25 or out > 5.0 * 365 * 86400:
+        return None
+    return out
+
+
 def parse_rsync_speed_to_bytes_per_sec(tok: str) -> Optional[float]:
     """
     Parse rsync progress speed tokens (e.g. ``12.50MiB/s``, ``165.68MB/s``, ``0.00kB/s``)
@@ -839,6 +872,42 @@ def parse_rsync_xfr_count(stats_raw: str) -> Optional[int]:
         return None
     m = re.search(r"(?i)xfr#(\d+)", stats_raw)
     return int(m.group(1)) if m else None
+
+
+def parse_rsync_queue_remaining_total(stats_raw: str) -> Optional[Tuple[int, int]]:
+    """
+    Parse ``to-chk=left/total`` (or ``ir-chk=`` while rsync is still scanning) from progress stats.
+
+    Returns ``(remaining, total)`` or ``None`` if no recognized fragment exists.
+    ``to-chk`` is preferred when both appear.
+    """
+    if not stats_raw or not stats_raw.strip():
+        return None
+    for key in ("to-chk", "ir-chk"):
+        m = re.search(rf"(?i){key}=([0-9]+)/([0-9]+)", stats_raw)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def estimate_rsync_total_bytes_from_progress(
+    transferred_bytes: Optional[int], percent: int
+) -> Optional[int]:
+    """
+    Infer total transfer size from rsync's cumulative byte counter and overall percent.
+
+    Only meaningful when ``percent`` is in ``1..99`` and ``transferred_bytes`` is set; returns
+    ``None`` on ambiguous input (e.g. ``percent == 0``).
+    """
+    if transferred_bytes is None or transferred_bytes < 0:
+        return None
+    p = max(0, min(100, int(percent)))
+    if p <= 0:
+        return None
+    if p >= 100:
+        return transferred_bytes
+    # Round to nearest byte; avoid float drift on huge values.
+    return (transferred_bytes * 100 + p // 2) // p
 
 
 def humanize_rsync_progress_stats(paren_inner: str) -> str:

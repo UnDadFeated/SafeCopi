@@ -19,8 +19,11 @@ from safecopi.utils import (
     local_free_bytes,
     normalize_existing_files_mode,
     parse_extra_rsync_args,
+    estimate_rsync_total_bytes_from_progress,
     parse_rsync_destination,
+    parse_rsync_eta_token_to_seconds,
     parse_rsync_progress2_line,
+    parse_rsync_queue_remaining_total,
     parse_rsync_speed_to_bytes_per_sec,
     parse_rsync_transferred_amount_token,
     parse_rsync_transfer_progress_line,
@@ -208,6 +211,30 @@ def test_parse_rsync_xfr_count() -> None:
     assert parse_rsync_xfr_count("xfr#42, to-chk=1/10") == 42
     assert parse_rsync_xfr_count("") is None
     assert parse_rsync_xfr_count("to-chk=1/10") is None
+
+
+def test_parse_rsync_queue_remaining_total() -> None:
+    assert parse_rsync_queue_remaining_total("xfr#1, to-chk=295659/295662") == (
+        295_659,
+        295_662,
+    )
+    assert parse_rsync_queue_remaining_total("IR-CHK=10/200") == (10, 200)
+    assert parse_rsync_queue_remaining_total("") is None
+
+
+def test_parse_rsync_eta_token_to_seconds() -> None:
+    assert parse_rsync_eta_token_to_seconds("0:03:30") == pytest.approx(210.0)
+    assert parse_rsync_eta_token_to_seconds("34:08:53") == pytest.approx(34 * 3600 + 8 * 60 + 53)
+    assert parse_rsync_eta_token_to_seconds("—") is None
+    assert parse_rsync_eta_token_to_seconds("") is None
+    assert parse_rsync_eta_token_to_seconds("not a time") is None
+
+
+def test_estimate_rsync_total_bytes_from_progress() -> None:
+    assert estimate_rsync_total_bytes_from_progress(50, 50) == 100
+    assert estimate_rsync_total_bytes_from_progress(100, 100) == 100
+    assert estimate_rsync_total_bytes_from_progress(100, 0) is None
+    assert estimate_rsync_total_bytes_from_progress(None, 50) is None
 
 
 def test_parse_rsync_transferred_amount_token() -> None:

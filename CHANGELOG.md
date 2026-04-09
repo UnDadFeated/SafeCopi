@@ -1,5 +1,78 @@
 # Changelog
 
+## [1.8.3] - 2026-04-09
+
+### Changed
+
+- **Layout**: **Command preview** sits above **File transfer**. In **File transfer**, **Session elapsed** is directly under **TRANSFER STATS**; **ATTEMPT** / **CURRENT PATH** follow below.
+
+## [1.8.2] - 2026-04-09
+
+### Changed
+
+- **Data remaining**: When percent- and queue-based estimates are unavailable, derive a bounded remainder from rsync **speed × ETA** (`parse_rsync_eta_token_to_seconds`). Queue extrapolation now waits for enough completed `to-chk` slots and caps implied totals to avoid wild figures.
+
+### Removed
+
+- **Dead code**: Unused `bytes_from_du_path` import; redundant `_extra_rsync_args()` wrapper (call sites use `_collect_rsync_modifiers()` directly).
+
+### Fixed
+
+- **Space check**: Skip local free-space probe when the destination path is empty (avoids pointless worker work).
+
+## [1.8.1] - 2026-04-09
+
+### Changed
+
+- **File transfer / path area**: Removed the rsync elapsed line (often `—` or misleading on size-first progress). The block above **CURRENT PATH** now shows only **`ATTEMPT n`**, styled like the path header; the label updates immediately when the retry counter changes.
+
+### Fixed
+
+- **Removed `Dest. space` button** (leftover references): Internal space checks no longer touch a missing widget; setup guide no longer points at that control.
+
+## [1.8.0] - 2026-04-09
+
+### Changed
+
+- **Preflight source scan removed**: The main window no longer walks local trees before sync. Transfer totals, queue depth, and remaining work are derived from rsync progress (`--info=progress2`): estimated total size from bytes + percent, file queue from `to-chk` / `ir-chk`, and data remaining from that estimate.
+- **Start sync / destination space**: Starting a sync (including dry run) runs a destination free-space check first, then launches rsync on success. Manual **Dest. space** still updates the same on-screen free-space value.
+- **File transfer layout**: The former Preflight column is removed; **File transfer** spans the full width. The progress bar shows **percent only**; a grid under the bar shows total size (estimate), files in queue, data remaining, speed, ETA, and destination free space.
+- **Transfer detail line**: Shows rsync elapsed time and attempt, with three blank lines before the current path (when present), without duplicating stats already shown under the bar.
+
+### Removed
+
+- **`SourceScanWorker`** and **Scan source** / **Stop scan** UI; `scan_source_tree_stats` remains in `utils` for non-GUI use.
+
+## [1.7.18] - 2026-04-09
+
+### Fixed
+
+- **Transfer detail byte display**: When a preflight scan total exists, the detail line’s byte figure is capped to that total even on the fallback path (so rsync’s counter cannot appear above the scan if `done_b` were ever unset).
+
+## [1.7.17] - 2026-04-09
+
+### Fixed
+
+- **Transfer bytes vs preflight scan**: When a source scan total exists, effective progress bytes are capped at that total for the bar, “sent” text, and detail line. rsync’s cumulative counter can legitimately exceed the scan (e.g. files that grew after the scan); the UI no longer shows a higher “attempt” byte total than the scan without explanation. A tooltip on the detail line appears when rsync’s raw counter is above the scan.
+
+## [1.7.16] - 2026-04-09
+
+### Changed
+
+- **Preflight / File transfer layout**: Preflight group box minimum height set to **132** to match File transfer.
+
+## [1.7.15] - 2026-04-09
+
+### Changed
+
+- **Preflight / File transfer layout**: Removed the in-Preflight trailing-slash note. Tightened vertical spacing so **Session elapsed** sits closer to the progress bar and the transfer detail line sits flush under it; the detail area keeps a minimum height for three wrapped lines. Slightly reduced minimum heights of the Preflight and File transfer group boxes.
+
+## [1.7.14] - 2026-04-09
+
+### Fixed
+
+- **Single-source destination layout**: Single local-source sync now follows the same destination behavior as multi-source runs by copying the selected parent folder into the destination (instead of copying only folder contents when the source path has a trailing slash).
+
 ## [1.7.13] - 2026-04-09
 
 ### Changed

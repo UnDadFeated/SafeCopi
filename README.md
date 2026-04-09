@@ -88,13 +88,14 @@ or:
 ## Helpful Notes
 
 - If you use remote paths, SSH keys are recommended.
-- A source scan improves progress accuracy on very large jobs.
+- **Start sync** checks destination free space, then runs rsync. Progress and size hints come from rsync’s own output (percent, bytes, and queue counters), not from a separate folder walk.
 - You can run a dry run first to preview behavior before writing files.
 - The app writes troubleshooting events to `debug.log`.
+- Local source folders are copied as folders into the destination (for example, selecting `Sofie Backup/` creates `Destination/Sofie Backup/`).
 
 ## Releases
 
-- Current release: `1.7.13`
+- Current release: `1.8.3`
 - Version source: [`safecopi/__init__.py`](safecopi/__init__.py)
 - Full history: [`CHANGELOG.md`](CHANGELOG.md)
 

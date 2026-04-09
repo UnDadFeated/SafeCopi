@@ -43,6 +43,18 @@ def test_source_path_dedup_key_local_trailing_slash(tmp_path, qtbot, offscreen_e
     assert MainWindow._source_path_dedup_key(a) == MainWindow._source_path_dedup_key(b)
 
 
+def test_source_for_sync_single_local_strips_trailing_slash(
+    tmp_path, qtbot, offscreen_env
+) -> None:
+    d = tmp_path / "Sofie Backup"
+    d.mkdir()
+    w = MainWindow()
+    qtbot.addWidget(w)
+    out = w._source_for_sync(str(d) + "/")
+    assert out.endswith("/Sofie Backup")
+    assert not out.endswith("/Sofie Backup/")
+
+
 def test_preflight_warnings_requires_destination(tmp_path, qtbot, offscreen_env) -> None:
     d = tmp_path / "src"
     d.mkdir()
@@ -57,7 +69,7 @@ def test_preflight_warnings_requires_destination(tmp_path, qtbot, offscreen_env)
     assert "destination" in mock_warn.call_args[0][2].lower()
 
 
-def test_get_guide_target_browse_dest_before_scan_when_dest_empty(
+def test_get_guide_target_browse_dest_when_dest_empty(
     tmp_path, qtbot, offscreen_env
 ) -> None:
     src = tmp_path / "src"
@@ -67,11 +79,10 @@ def test_get_guide_target_browse_dest_before_scan_when_dest_empty(
     w._source_list.clear()
     w._source_list.addItem(str(src) + "/")
     w._dest.clear()
-    w._last_scan = (None, None)
     assert w._get_guide_target() is w._btn_browse_dest
 
 
-def test_get_guide_target_remote_source_goes_to_ssh_not_scan(
+def test_get_guide_target_remote_source_goes_to_ssh(
     qtbot, offscreen_env,
 ) -> None:
     w = MainWindow()
@@ -79,12 +90,11 @@ def test_get_guide_target_remote_source_goes_to_ssh_not_scan(
     w._source_list.clear()
     w._source_list.addItem("user@example.com:/data/")
     w._dest.setText("/mnt/backup/")
-    w._last_scan = (None, None)
     w._ssh_ok_this_session = False
     assert w._get_guide_target() is w._btn_ssh
 
 
-def test_get_guide_target_scan_after_dest_when_local_not_scanned(
+def test_get_guide_target_start_after_dest_when_local_ready(
     tmp_path, qtbot, offscreen_env
 ) -> None:
     src = tmp_path / "src"
@@ -94,8 +104,8 @@ def test_get_guide_target_scan_after_dest_when_local_not_scanned(
     w._source_list.clear()
     w._source_list.addItem(str(src) + "/")
     w._dest.setText("/tmp/dest/")
-    w._last_scan = (None, None)
-    assert w._get_guide_target() is w._btn_scan
+    w._ssh_ok_this_session = True
+    assert w._get_guide_target() is w._btn_start
 
 
 def test_get_guide_target_mixed_local_remote_points_remove(
@@ -135,14 +145,11 @@ def test_recursive_subdirs_default_on(qtbot, offscreen_env) -> None:
     assert "-hlptgoD" in argv_flat
 
 
-def test_progress_done_bytes_counts_skipped_when_skip_mode_enabled(
+def test_sync_transfer_bar_units_follows_rsync_percent(
     qtbot, offscreen_env
 ) -> None:
     w = MainWindow()
     qtbot.addWidget(w)
-    w._last_scan = (100, 1_000)
-    idx = w._combo_existing_files.findData("skip_name")
-    w._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
     snap = RsyncProgressSnapshot(
         percent=60,
         elapsed="0:00:10",
@@ -155,35 +162,11 @@ def test_progress_done_bytes_counts_skipped_when_skip_mode_enabled(
     assert w._sync_transfer_bar_units(snap) == 6000
 
 
-def test_progress_done_bytes_uses_transferred_in_overwrite_mode(
-    qtbot, offscreen_env
-) -> None:
+def test_multi_source_progress_weighted_across_sources(qtbot, offscreen_env) -> None:
     w = MainWindow()
     qtbot.addWidget(w)
-    w._last_scan = (100, 1_000)
-    idx = w._combo_existing_files.findData("overwrite")
-    w._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
-    snap = RsyncProgressSnapshot(
-        percent=60,
-        elapsed="0:00:10",
-        speed="10.00MiB/s",
-        eta="0:00:04",
-        stats_raw="",
-        stats_human="",
-        transferred_bytes=100,
-    )
-    assert w._sync_transfer_bar_units(snap) == 1000
-
-
-def test_multi_source_progress_keeps_cumulative_baseline(qtbot, offscreen_env) -> None:
-    w = MainWindow()
-    qtbot.addWidget(w)
-    w._last_scan = (100, 1_000)
     w._sync_total_source_runs = 2
-    w._sync_current_source_estimate_bytes = 500
     w._on_rsync_source_run_changed(1, 2)
-    idx = w._combo_existing_files.findData("skip_name")
-    w._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
 
     snap1 = RsyncProgressSnapshot(
         percent=100,
@@ -217,4 +200,19 @@ def test_check_dest_space_local_updates_label(tmp_path, qtbot, offscreen_env) ->
     w._dest.setText(str(d) + "/")
     w._check_dest_space()
     qtbot.waitUntil(lambda: not w._dest_space_busy(), timeout=5000)
-    assert w._lbl_dest_free.text() not in ("—", "— (unreadable)")
+    t = w._lbl_stat_dest_free.text()
+    assert t not in ("—", "— (unreadable)")
+
+
+def test_preview_single_source_shows_parent_folder_copy(tmp_path, qtbot, offscreen_env) -> None:
+    d = tmp_path / "Sofie Backup"
+    d.mkdir()
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._source_list.clear()
+    w._source_list.addItem(str(d) + "/")
+    w._dest.setText(str(tmp_path / "dest") + "/")
+    w._refresh_rsync_preview()
+    preview = w._rsync_preview.toPlainText()
+    assert str(d) in preview
+    assert (str(d) + "/") not in preview

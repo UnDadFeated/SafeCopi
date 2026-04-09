@@ -1,13 +1,11 @@
-"""Background tasks: source scan and rsync with progress parsing."""
+"""Background tasks: destination space checks, updates, and rsync with progress parsing."""
 
 from __future__ import annotations
 
 import os
 import re
 import signal
-import threading
 from dataclasses import replace
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import (
@@ -29,7 +27,6 @@ from safecopi.utils import (
     is_rsync_filename_only_stderr_line,
     local_free_bytes,
     parse_rsync_transfer_progress_line,
-    scan_source_tree_stats,
     should_log_rsync_stderr_line,
 )
 
@@ -88,134 +85,6 @@ class GitHubUpdateCheckWorker(QObject):
             self.finished.emit(tag)
         finally:
             debug_log("UPDATE", "github_check_worker_end")
-            app = QCoreApplication.instance()
-            if app is not None:
-                gui = app.thread()
-                if gui is not None and self.thread() is not gui:
-                    self.moveToThread(gui)
-
-
-class SourceScanWorker(QObject):
-    """Compute file count and total bytes in one tree walk (interactive on slow LAN mounts)."""
-
-    # Third flag: True when the user requested stop before the walk finished.
-    finished = Signal(object, object, object)
-    failed = Signal(str)
-    phase = Signal(str)
-    # Use object, not int: Qt's int is 32-bit; total bytes exceed 2^31 on large trees.
-    scan_progress = Signal(object, object)  # files_seen: int, total_bytes_so_far: int
-
-    def __init__(self, parent: Optional[QObject] = None) -> None:
-        super().__init__(parent)
-        self._cancel = threading.Event()
-        self._source_path = ""
-        self._source_paths: Optional[List[str]] = None
-
-    def prepare_source(self, source_path: str) -> None:
-        """Set the tree to scan; call before ``thread.start()`` and the slot ``run()``."""
-        self._source_path = source_path
-        self._source_paths = None
-
-    def prepare_sources(self, paths: List[str]) -> None:
-        """Scan several local trees; sums file counts and bytes. Mutually exclusive with ``prepare_source``."""
-        self._source_paths = list(paths)
-        self._source_path = ""
-
-    def request_cancel(self) -> None:
-        """Request cooperative cancellation (checked between files during the walk)."""
-        self._cancel.set()
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            debug_log(
-                "SCAN",
-                "run_start",
-                multi_source=self._source_paths is not None,
-            )
-            self._cancel.clear()
-            multi = self._source_paths
-            if multi is not None:
-                npaths = len(multi)
-                if npaths == 0:
-                    self.failed.emit("No source folders to scan.")
-                    return
-                self.phase.emit(
-                    f"Walking {npaths} source folders — summing file sizes (can be slow on mounts)."
-                )
-                self.scan_progress.emit(0, 0)
-                total_c, total_b = 0, 0
-                for i, source_path in enumerate(multi):
-                    if self._cancel.is_set():
-                        self.finished.emit(total_c, total_b, True)
-                        return
-                    path = Path(source_path).expanduser()
-                    if not path.is_dir():
-                        self.failed.emit(f"Source is not a directory: {source_path}")
-                        return
-                    self.phase.emit(
-                        f"Scanning folder {i + 1}/{npaths}: {source_path}"
-                    )
-                    tc_snap, tbb_snap = total_c, total_b
-
-                    def _on_prog(n: int, tb_local: int) -> None:
-                        self.scan_progress.emit(tc_snap + n, tbb_snap + tb_local)
-
-                    try:
-                        count, size_part = scan_source_tree_stats(
-                            str(path),
-                            on_progress=_on_prog,
-                            should_cancel=lambda: self._cancel.is_set(),
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        self.failed.emit(str(e))
-                        return
-                    if count is None:
-                        self.failed.emit(
-                            "Could not read the source tree (permissions or I/O error)."
-                        )
-                        return
-                    total_c += count
-                    total_b += size_part
-                    self.scan_progress.emit(total_c, total_b)
-                was_cancelled = self._cancel.is_set()
-                self.finished.emit(total_c, total_b, was_cancelled)
-                return
-
-            source_path = self._source_path
-            path = Path(source_path).expanduser()
-            if not path.is_dir():
-                self.failed.emit(f"Source is not a directory: {source_path}")
-                return
-            self.phase.emit(
-                "Walking source tree — summing file sizes (can be slow on network mounts)."
-            )
-            self.scan_progress.emit(0, 0)
-            try:
-
-                def _on_prog(n: int, total_bytes: int) -> None:
-                    self.scan_progress.emit(n, total_bytes)
-
-                count, size_b = scan_source_tree_stats(
-                    str(path),
-                    on_progress=_on_prog,
-                    should_cancel=lambda: self._cancel.is_set(),
-                )
-            except Exception as e:  # noqa: BLE001
-                self.failed.emit(str(e))
-                return
-            if count is None:
-                self.failed.emit(
-                    "Could not read the source tree (permissions or I/O error)."
-                )
-                return
-            was_cancelled = self._cancel.is_set()
-            self.finished.emit(count, size_b, was_cancelled)
-        finally:
-            debug_log("SCAN", "run_end")
-            # Repatriate to the GUI thread before the worker QThread stops. Otherwise
-            # thread.finished → worker.deleteLater targets a dead event loop (Qt warning,
-            # crashes / SIGBUS with PySide).
             app = QCoreApplication.instance()
             if app is not None:
                 gui = app.thread()

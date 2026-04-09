@@ -16,6 +16,7 @@ from safecopi.utils import (
     human_bytes,
     humanize_rsync_progress_stats,
     is_rsync_filename_only_stderr_line,
+    local_free_bytes,
     normalize_existing_files_mode,
     parse_extra_rsync_args,
     parse_rsync_destination,
@@ -239,6 +240,14 @@ def test_parse_rsync_transfer_progress_line_prefers_progress2() -> None:
     assert s.elapsed == "0:00:01"
     assert s.transferred_bytes is None
     assert s.transferred_display is None
+
+
+def test_local_free_bytes_existing_path_returns_value(tmp_path) -> None:
+    d = tmp_path / "free-check"
+    d.mkdir()
+    free = local_free_bytes(str(d), timeout_sec=5)
+    assert isinstance(free, int)
+    assert free > 0
 
 
 def test_format_rsync_hms_for_display() -> None:

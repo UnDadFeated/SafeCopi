@@ -6,59 +6,59 @@
   <a href="https://github.com/UnDadFeated/SafeCopi/commits/main/"><img src="https://img.shields.io/github/last-commit/UnDadFeated/SafeCopi/main?logo=github" alt="Last commit"></a>
   <br>
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&amp;logoColor=white" alt="PySide6">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/rsync-OpenSSH-333333?logo=openssh" alt="rsync over SSH">
 </p>
 
-**SafeCopi** is a desktop application for **synchronizing directories to remote hosts** with **OpenSSH** and **rsync**. It is aimed at backups and long-running archive jobs: preflight checks (tree scan, remote free space, SSH connectivity), parsed transfer progress, bounded I/O timeouts, automatic retries, and an activity log with timestamps.
+SafeCopi helps you copy and back up files safely, especially when your network is unreliable.
 
-The UI is a fixed-layout, dark-themed window (720×880). **Preflight** and **File transfer** share the main row (~30% / ~70% width). Session options persist via **Qt `QSettings`**; **SSH password fields are never saved to disk**.
-
----
-
-## Contents
-
-- [Capabilities](#capabilities)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Running](#running)
-- [Usage](#usage)
-- [Development](#development)
-- [Releases & history](#releases--history)
+If your transfer keeps failing because Wi-Fi drops, VPN disconnects, or a remote server goes offline for a moment, SafeCopi is made for that.
 
 ---
 
-## Capabilities
+## What It Does
 
-| Area | Behavior |
-| :--- | :--- |
-| **Sources** | One or more **local** folders (up to **64**); each appears under the destination by folder name. A **single** remote source `user@host:/path` is supported and **cannot** be combined with extra list entries. |
-| **Preflight** | Optional recursive scan of all listed local trees (counts and byte totals, throttled UI updates). While scanning, path fields, rsync options, **Test SSH**, **Dest. space**, and **Start sync** are disabled. |
-| **Diagnostics** | Append-only **`debug.log`** under Qt’s app config dir (often ``~/.config/SafeCopi/SafeCopi/debug.log`` on Linux when org/app are both ``SafeCopi``): **last 3 app sessions** retained (rotation on startup), **ms-resolution** timestamps, session/settings/preflight/sync milestones, SSH/space/update **error excerpts**, and **shutdown** signals where possible — **not** rsync transfer/file listings. |
+- Copies one or many source folders to a destination.
+- Works with local drives and remote destinations (`user@host:/path`).
+- Automatically retries after errors or disconnects.
+- Lets you pause and resume a running transfer.
+- Shows progress, speed, and time remaining.
+- Can check destination free space before starting.
+- Can test SSH before starting remote copies.
 
-| **Guide pulse** | Idle highlight follows setup order: **Add folder** (if no sources) → fix invalid local paths → destination **Browse** when empty → **Scan source** (optional, only after destination is set for local folders) → **Test SSH** / **Check destination space** when needed → **Start sync**. Invalid multi-source mixes (local + remote in one list) target **Remove**. |
-| **Remote space** | `df` over SSH, walking to parents when the destination path does not exist yet. |
-| **SSH** | Password-capable when required (`PubkeyAuthentication=no` with password, `SSH_ASKPASS`, optional `sshpass`). **Test SSH** uses the destination host if remote, otherwise the source host. |
-| **Sync** | Centralized rsync argv (`--info=progress2`, timeouts, archive-style modes). **If file exists** defaults to **Skip (if filename and size is same)** (`--size-only`). Multi-source runs are **sequential** in one session. **Pause** / **Resume** (POSIX **SIGSTOP**/**SIGCONT** or deferred retry). Retries until success, failure, or user stop. |
-| **Progress** | 0–10000 bar with percentage, bytes remaining (vs last scan when available), throughput, and ETA; monotonic behavior. For multi-source sessions, one cumulative bar runs from 0% to 100% across all source folders (no per-source reset). The activity log records **rsync errors/warnings and ``rsync:`` diagnostics** only — not per-file ``-v`` chatter or routine transfer totals. |
+---
+
+## Why People Use It
+
+- Large backups that run for hours or days.
+- Home server / NAS backups over shaky links.
+- Remote copies where normal rsync commands are easy to mistype.
+- Anyone who wants a safer, simpler workflow than running shell commands by hand.
+
+---
+
+## Quick Start
+
+1. Add your source folder(s).
+2. Set destination (local path or `user@host:/path`).
+3. For remote targets, run **Test SSH**.
+4. Run **Dest. space** to confirm capacity.
+5. Click **Start sync**.
+
+SafeCopi will keep retrying if the connection drops, based on your retry settings.
 
 ---
 
 ## Requirements
 
-| Component | Notes |
-| :--- | :--- |
-| **Python** | 3.10 or newer |
-| **Python packages** | [`requirements.txt`](requirements.txt) (PySide6) |
-| **System** | `rsync` and `ssh` on `PATH` |
-| **Optional** | `sshpass` for password-based SSH when keys are not used (e.g. Arch/CachyOS: `sudo pacman -S sshpass`) |
-
-SSH **public keys** are recommended for unattended runs. If you see repeated “Permission denied”, verify with `ssh user@host` in a terminal.
+- Python 3.10 or newer
+- `rsync` and `ssh` installed on your system
+- Python packages in [`requirements.txt`](requirements.txt)
+- Optional: `sshpass` if you do password-based SSH without keys
 
 ---
 
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/UnDadFeated/SafeCopi.git
@@ -67,16 +67,6 @@ python -m venv .venv
 .venv/bin/pip install -U pip
 .venv/bin/pip install -r requirements.txt
 ```
-
-Alternatively, from the repository root:
-
-```bash
-./bootstrap
-```
-
-**Fish:** Prefer `.venv/bin/python` directly, or `source .venv/bin/activate.fish`. Do not use the bash-oriented `activate` script.
-
-**PEP 668 (system Python, e.g. Arch):** Always install into the venv (`.venv/bin/pip`, `.venv/bin/python`).
 
 ---
 
@@ -87,7 +77,7 @@ cd SafeCopi
 .venv/bin/python -m safecopi
 ```
 
-Or, after `chmod +x run-safecopi`:
+or:
 
 ```bash
 ./run-safecopi
@@ -95,37 +85,18 @@ Or, after `chmod +x run-safecopi`:
 
 ---
 
-## Usage
+## Helpful Notes
 
-1. **Source** — Add one or more **local** directories. With multiple entries, each syncs to `destination/FolderName/…`. One **user@host:/path** remote source is allowed **alone** (not with extra list rows).
-2. **Destination** — Rsync-style target, e.g. `user@host:/mnt/backup/Archive/`.
-3. **Trailing slashes** — Rsync semantics differ for `path` vs `path/`; see the in-app Preflight note when typing paths.
-4. **Check destination space** — Recommended before large transfers.
-5. **Scan source** — Optional; aggregates all listed local trees. Totals use file sizes (may differ slightly from `du` for sparse or special files).
-6. **Dry run** — Adds `--dry-run` (no writes).
-7. **Subdirectories** — Recursive copy (`-ah`) is the default; turning it off limits to the top level (`-hlptgoD` without `-r`).
-8. **Partial files** — Choose `--partial` for resumable interrupted files where appropriate.
-9. **Extra rsync arguments** — Append flags as needed; add `--info=name0` to reduce per-file path verbosity in the UI if desired.
+- If you use remote paths, SSH keys are recommended.
+- A source scan improves progress accuracy on very large jobs.
+- You can run a dry run first to preview behavior before writing files.
+- The app writes troubleshooting events to `debug.log`.
 
----
+## Releases
 
-## Development
-
-Install dev dependencies and run tests headlessly:
-
-```bash
-.venv/bin/pip install -r requirements-dev.txt
-QT_QPA_PLATFORM=offscreen .venv/bin/pytest tests/
-```
-
----
-
-## Releases & history
-
-- **Current version:** [`safecopi/__init__.py`](safecopi/__init__.py) (`__version__`)
-- **Release notes:** [`CHANGELOG.md`](CHANGELOG.md)
-
-**Suggested GitHub topics:** `rsync`, `ssh`, `backup`, `sync`, `pyside6`, `pyqt`, `python`, `linux`, `gui`, `file-transfer`
+- Current release: `1.7.13`
+- Version source: [`safecopi/__init__.py`](safecopi/__init__.py)
+- Full history: [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 

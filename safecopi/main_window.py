@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (
     QElapsedTimer,
+    QMetaObject,
     QProcess,
     QProcessEnvironment,
     QSettings,
@@ -1776,7 +1777,10 @@ class MainWindow(QWidget):
         worker = DestSpaceWorker()
         worker.moveToThread(thread)
         worker.prepare_local(dest, query_timeout_sec=float(min(io_sec + 60, 180)))
-        thread.started.connect(worker.run, Qt.DirectConnection)
+        # Ensure worker.run is queued onto the worker thread event loop on all Qt/PySide builds.
+        thread.started.connect(
+            lambda: QMetaObject.invokeMethod(worker, "run", Qt.QueuedConnection)
+        )
         worker.finished.connect(self._on_dest_space_worker_finished, Qt.QueuedConnection)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._on_dest_space_thread_finished)

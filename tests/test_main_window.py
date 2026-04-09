@@ -207,3 +207,14 @@ def test_multi_source_progress_keeps_cumulative_baseline(qtbot, offscreen_env) -
         transferred_bytes=20,
     )
     assert w._sync_transfer_bar_units(snap2) == 7500
+
+
+def test_check_dest_space_local_updates_label(tmp_path, qtbot, offscreen_env) -> None:
+    d = tmp_path / "dest"
+    d.mkdir()
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._dest.setText(str(d) + "/")
+    w._check_dest_space()
+    qtbot.waitUntil(lambda: not w._dest_space_busy(), timeout=5000)
+    assert w._lbl_dest_free.text() not in ("—", "— (unreadable)")

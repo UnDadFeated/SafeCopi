@@ -156,12 +156,17 @@ def _local_free_bytes_impl(path: str) -> Optional[int]:
     """Free space on the filesystem containing ``path`` (local); may block on bad mounts."""
     p = Path(path).expanduser()
     try:
+        def _disk_free(target: Path) -> int:
+            # Avoid Path.resolve() for local free-space checks: resolving symlinks/parents can
+            # fail on permission-restricted mount points while disk_usage on the path still works.
+            return shutil.disk_usage(os.path.abspath(str(target))).free
+
         if p.exists():
-            return shutil.disk_usage(str(p.resolve())).free
+            return _disk_free(p)
         cur = p.parent
         while cur != cur.parent:
             if cur.exists():
-                return shutil.disk_usage(str(cur.resolve())).free
+                return _disk_free(cur)
             cur = cur.parent
         return shutil.disk_usage("/").free
     except OSError:
@@ -182,12 +187,17 @@ def local_free_bytes(path: str, *, timeout_sec: Optional[float] = None) -> Optio
     t = float(timeout_sec)
     if t <= 0:
         return None
-    with ThreadPoolExecutor(max_workers=1) as ex:
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
         fut = ex.submit(_local_free_bytes_impl, path)
         try:
             return fut.result(timeout=t)
         except FuturesTimeoutError:
+            # Do not block waiting for a potentially stuck filesystem probe thread.
+            fut.cancel()
             return None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def ssh_extra_argv(

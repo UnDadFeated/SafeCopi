@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.7.13] - 2026-04-09
+
+### Changed
+
+- **README (end-user clarity)**: Documentation was rewritten in plain language for non-technical users, with a simpler "what it does / quick start / helpful notes" structure and reduced protocol-level detail.
+
+## [1.7.12] - 2026-04-09
+
+### Changed
+
+- **Project positioning/documentation**: Repository-facing description and README were rewritten to prioritize SafeCopi's core purpose: resilient, safe rsync transfers for unstable or unreliable network connections (dropouts, intermittent SSH routes, and long-running backup sessions).
+
+## [1.7.11] - 2026-04-09
+
+### Fixed
+
+- **Dest. space (local)**: Local destination free-space checks now schedule the worker `run` slot through an explicit queued `QMetaObject.invokeMethod(...)` call at thread start, addressing environments where `QThread.started` wiring did not execute the worker slot (observed as `SPACE ui_check_start` without `SPACE check_start` in `debug.log`).
+- **Local free-space timeout behavior**: `local_free_bytes(..., timeout_sec=...)` no longer blocks on executor shutdown after timeout; timed-out probes return promptly without waiting on a potentially stuck filesystem call.
+
+## [1.7.10] - 2026-04-09
+
+### Fixed
+
+- **Dest. space (local)**: Local free-space checks now start the worker slot using a queued thread-start connection, ensuring the local destination query runs reliably and the **Destination free** field is populated for local paths on all supported platforms.
+
 ## [1.7.9] - 2026-04-09
 
 ### Fixed

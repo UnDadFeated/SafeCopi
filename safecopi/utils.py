@@ -15,8 +15,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Optional, Tuple
-from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+from urllib.parse import unquote, urlparse
+from urllib.request import Request, urlopen
 
 _ASKPASS_WRAPPER: Optional[Path] = None
 
@@ -25,6 +26,13 @@ RSYNC_TIMEOUT_SEC_MAX: int = 86400
 RSYNC_RETRY_WAIT_SEC_MAX: int = 3600
 EXTRA_RSYNC_ARG_LINE_MAX_CHARS: int = 32_768
 EXTRA_RSYNC_ARG_COUNT_MAX: int = 512
+
+# Ceiling beyond SSH ``ConnectTimeout`` for ``subprocess.run`` / UI watchdog timers.
+SSH_SUBPROCESS_MAX_RUNTIME_OVERHEAD_SEC: int = 120
+# Remote ``df`` space check: one subprocess; keep total wait below typical UI expectations.
+SSH_DF_SUBPROCESS_OVERHEAD_SEC: int = 60
+# Standalone **Test SSH** uses this ``ConnectTimeout`` (matches UI watchdog duration).
+SSH_TEST_CONNECT_TIMEOUT_SEC: int = 12
 
 # user@host:/path or host:/path — path may contain colons rarely; first : after host is separator
 _RSYNC_REMOTE = re.compile(
@@ -45,13 +53,42 @@ class RemoteTarget:
             return f"{self.user}@{self.host}"
         return self.host
 
+    def to_rsync_uri(self) -> str:
+        """Rsync/OpenSSH form ``[user@]host:/path`` (path is absolute on the remote)."""
+        p = self.path if self.path.startswith("/") else f"/{self.path}"
+        if self.user:
+            return f"{self.user}@{self.host}:{p}"
+        return f"{self.host}:{p}"
+
+
+# Dolphin/KDE and similar paste ``sftp://…`` / ``ssh://…`` / ``fish://…`` URLs here.
+_URL_REMOTE_SCHEMES = frozenset({"sftp", "ssh", "fish"})
+
 
 def parse_rsync_destination(dest: str) -> Tuple[Optional[RemoteTarget], str]:
     """
     Return (RemoteTarget, local_path) for a destination string.
     If not remote, RemoteTarget is None and local_path is dest stripped.
+
+    Accepts rsync/scp style ``user@host:/path`` and URL forms such as
+    ``sftp://user@host/path`` (Dolphin). Non-default SSH ports in the URL are not
+    carried into :class:`RemoteTarget` (OpenSSH uses port 22 unless overridden in ssh config).
     """
     s = dest.strip()
+    if not s:
+        return None, s
+
+    if "://" in s[:24]:
+        parsed = urlparse(s)
+        scheme = parsed.scheme.lower() if parsed.scheme else ""
+        if scheme in _URL_REMOTE_SCHEMES and parsed.hostname:
+            path = unquote(parsed.path or "/")
+            if not path.startswith("/"):
+                path = "/" + path if path else "/"
+            user = parsed.username
+            host = parsed.hostname
+            return RemoteTarget(host=host, path=path, user=user), path
+
     m = _RSYNC_REMOTE.match(s)
     if not m:
         return None, s
@@ -59,6 +96,18 @@ def parse_rsync_destination(dest: str) -> Tuple[Optional[RemoteTarget], str]:
     host = m.group("host")
     path = m.group("path")
     return RemoteTarget(host=host, path=path, user=user), path
+
+
+def canonical_rsync_path(path: str) -> str:
+    """
+    Normalize remote paths for rsync/ssh: URL-style remotes become ``user@host:/path``.
+    Local paths and already-canonical remotes are returned trimmed unchanged.
+    """
+    s = path.strip()
+    remote, _ = parse_rsync_destination(s)
+    if remote is None:
+        return s
+    return remote.to_rsync_uri()
 
 
 def bytes_from_du_path(path: str) -> Optional[int]:
@@ -103,8 +152,8 @@ def ensure_ssh_askpass_wrapper() -> Path:
     return path
 
 
-def local_free_bytes(path: str) -> Optional[int]:
-    """Free space on the filesystem containing ``path`` (local)."""
+def _local_free_bytes_impl(path: str) -> Optional[int]:
+    """Free space on the filesystem containing ``path`` (local); may block on bad mounts."""
     p = Path(path).expanduser()
     try:
         if p.exists():
@@ -117,6 +166,28 @@ def local_free_bytes(path: str) -> Optional[int]:
         return shutil.disk_usage("/").free
     except OSError:
         return None
+
+
+def local_free_bytes(path: str, *, timeout_sec: Optional[float] = None) -> Optional[int]:
+    """
+    Free space on the filesystem containing ``path`` (local).
+
+    With ``timeout_sec``, the stat walk runs in a worker thread so a stuck NFS/FUSE path
+    cannot block indefinitely (returns ``None`` on timeout).
+    """
+    if timeout_sec is None:
+        return _local_free_bytes_impl(path)
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+    t = float(timeout_sec)
+    if t <= 0:
+        return None
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_local_free_bytes_impl, path)
+        try:
+            return fut.result(timeout=t)
+        except FuturesTimeoutError:
+            return None
 
 
 def ssh_extra_argv(
@@ -172,6 +243,52 @@ def rsync_ssh_e_shell(
     return " ".join(shlex.quote(p) for p in parts)
 
 
+def build_ssh_command_argv(
+    remote: RemoteTarget,
+    remote_cmd: str,
+    *,
+    connect_timeout: int = 15,
+    batch_mode: bool = True,
+    password_for_sshpass: Optional[str] = None,
+) -> List[str]:
+    """
+    Build ``ssh`` argv (or ``sshpass -e ssh …`` when a password is supplied).
+    Raises ``FileNotFoundError`` if ``password_for_sshpass`` is set but ``sshpass`` is missing.
+    """
+    core = [
+        "ssh",
+        *ssh_extra_argv(connect_timeout, batch_mode, for_rsync=False),
+        remote.ssh_spec(),
+        remote_cmd,
+    ]
+    if password_for_sshpass:
+        ss = shutil.which("sshpass")
+        if not ss:
+            raise FileNotFoundError(
+                "sshpass is not installed; install it (e.g. pacman -S sshpass) or leave the password field empty to use the GUI askpass."
+            )
+        return [ss, "-e", *core]
+    return core
+
+
+def ssh_command_environment(
+    extra_env: Optional[Dict[str, str]],
+    password_for_sshpass: Optional[str],
+) -> Dict[str, str]:
+    """Environment for standalone ``ssh`` / ``sshpass`` (matches :func:`run_ssh_command`)."""
+    env = os.environ.copy()
+    if password_for_sshpass:
+        env["SSHPASS"] = password_for_sshpass
+        if extra_env:
+            for k, v in extra_env.items():
+                if k not in ("SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+                    env[k] = v
+    else:
+        if extra_env:
+            env.update(extra_env)
+    return env
+
+
 def run_ssh_command(
     remote: RemoteTarget,
     remote_cmd: str,
@@ -180,44 +297,35 @@ def run_ssh_command(
     batch_mode: bool = True,
     extra_env: Optional[Dict[str, str]] = None,
     password_for_sshpass: Optional[str] = None,
+    max_runtime_overhead_sec: Optional[int] = None,
 ) -> subprocess.CompletedProcess:
     """Run a shell command on the remote host via SSH."""
-    core = [
-        "ssh",
-        *ssh_extra_argv(connect_timeout, batch_mode, for_rsync=False),
-        remote.ssh_spec(),
+    ssh_cmd = build_ssh_command_argv(
+        remote,
         remote_cmd,
-    ]
-    env = os.environ.copy()
-    if password_for_sshpass:
-        ss = shutil.which("sshpass")
-        if not ss:
-            raise FileNotFoundError(
-                "sshpass is not installed; install it (e.g. pacman -S sshpass) or leave the password field empty to use the GUI askpass."
-            )
-        env["SSHPASS"] = password_for_sshpass
-        ssh_cmd = [ss, "-e", *core]
-        if extra_env:
-            filtered = {
-                k: v
-                for k, v in extra_env.items()
-                if k not in ("SSH_ASKPASS", "SSH_ASKPASS_REQUIRE")
-            }
-            env.update(filtered)
-    else:
-        ssh_cmd = core
-        if extra_env:
-            env.update(extra_env)
+        connect_timeout=connect_timeout,
+        batch_mode=batch_mode,
+        password_for_sshpass=password_for_sshpass,
+    )
+    env = ssh_command_environment(extra_env, password_for_sshpass)
+    overhead = (
+        SSH_SUBPROCESS_MAX_RUNTIME_OVERHEAD_SEC
+        if max_runtime_overhead_sec is None
+        else max(1, int(max_runtime_overhead_sec))
+    )
+    run_kw: Dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "capture_output": True,
+        "text": True,
+        "timeout": connect_timeout + overhead,
+        "env": env,
+    }
+    # New session so ``timeout`` can drop the whole tree (ssh/sshpass) on POSIX.
+    if os.name != "nt":
+        run_kw["start_new_session"] = True
     # No TTY on stdin: if ssh inherits a terminal (e.g. app started from a shell), it would
     # read the password there instead of invoking SSH_ASKPASS — no GUI popup.
-    return subprocess.run(
-        ssh_cmd,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=connect_timeout + 120,
-        env=env,
-    )
+    return subprocess.run(ssh_cmd, **run_kw)
 
 
 def _remote_df_path_candidates(path_on_remote: str) -> List[str]:
@@ -238,6 +346,41 @@ def _remote_df_path_candidates(path_on_remote: str) -> List[str]:
     return out
 
 
+def build_remote_df_shell_command(path_on_remote: str) -> str:
+    """
+    Remote shell command: try ``df -B1 -P`` on ``path_on_remote`` and each parent until one exists.
+    """
+    cands = _remote_df_path_candidates(path_on_remote)
+    quoted = []
+    for c in cands:
+        q = c.replace("'", "'\"'\"'")
+        quoted.append(f"'{q}'")
+    inner = " ".join(quoted)
+    return (
+        f"sh -c 'for d in {inner}; do "
+        r'o=$(df -B1 -P "$d" 2>/dev/null | tail -n +2 | head -n1); '
+        r'[ -n "$o" ] && echo "$o" && exit 0; '
+        f"done; exit 1'"
+    )
+
+
+def parse_remote_df_stdout(stdout: str) -> Optional[int]:
+    """Parse ``df -B1 -P`` data line from captured remote stdout (last non-empty line)."""
+    text = (stdout or "").strip()
+    if not text:
+        return None
+    line = text.splitlines()[-1].strip()
+    if not line or line.lower().startswith("filesystem"):
+        return None
+    parts = line.split()
+    if len(parts) < 4:
+        return None
+    try:
+        return int(parts[3])
+    except ValueError:
+        return None
+
+
 def remote_df_free_bytes(
     remote: RemoteTarget,
     path_on_remote: str,
@@ -253,19 +396,7 @@ def remote_df_free_bytes(
     Tries ``df -B1 -P`` on the path and each parent until one exists: rsync destinations
     often do not exist yet, so ``df`` on the full path alone would fail.
     """
-    cands = _remote_df_path_candidates(path_on_remote)
-    quoted = []
-    for c in cands:
-        q = c.replace("'", "'\"'\"'")
-        quoted.append(f"'{q}'")
-    inner = " ".join(quoted)
-    # Skip header line (tail -n +2); first successful df wins.
-    remote_cmd = (
-        f"sh -c 'for d in {inner}; do "
-        r'o=$(df -B1 -P "$d" 2>/dev/null | tail -n +2 | head -n1); '
-        r'[ -n "$o" ] && echo "$o" && exit 0; '
-        f"done; exit 1'"
-    )
+    remote_cmd = build_remote_df_shell_command(path_on_remote)
     try:
         proc = run_ssh_command(
             remote,
@@ -274,18 +405,9 @@ def remote_df_free_bytes(
             batch_mode=batch_mode,
             extra_env=extra_env,
             password_for_sshpass=password_for_sshpass,
+            max_runtime_overhead_sec=SSH_DF_SUBPROCESS_OVERHEAD_SEC,
         )
-        text = (proc.stdout or "").strip()
-        if not text:
-            return None
-        line = text.splitlines()[-1].strip()
-        if not line or line.lower().startswith("filesystem"):
-            return None
-        parts = line.split()
-        if len(parts) < 4:
-            return None
-        avail = int(parts[3])
-        return avail
+        return parse_remote_df_stdout(proc.stdout or "")
     except (ValueError, subprocess.TimeoutExpired, OSError, IndexError):
         return None
 
@@ -525,7 +647,7 @@ _LEGACY_EXISTING_FILES_MODE_MAP: Dict[str, str] = {
 
 # (label shown in combo box, mode key for settings / :func:`existing_files_mode_rsync_argv`).
 EXISTING_FILES_MODE_CHOICES: List[Tuple[str, str]] = [
-    ("Skip (if name and size is same)", "skip_name_size"),
+    ("Skip (if filename and size is same)", "skip_name_size"),
     ("Skip (if only name is same)", "skip_name"),
     ("Overwrite", "overwrite"),
 ]
@@ -583,28 +705,34 @@ def is_remote_version_newer(current: str, remote: str) -> bool:
     return _parse_semver_triplet(remote) > _parse_semver_triplet(current)
 
 
-def fetch_latest_github_version(owner: str = "UnDadFeated", repo: str = "SafeCopi") -> Optional[str]:
+def fetch_latest_github_version(
+    owner: str = "UnDadFeated", repo: str = "SafeCopi",
+) -> Tuple[Optional[str], str]:
     """
-    Return the latest tagged version from GitHub releases, or None on error.
+    Return ``(tag_name, error_detail)``.
 
-    Uses the public ``/releases/latest`` endpoint and reads ``tag_name``. Network and
-    JSON errors are swallowed; callers should treat ``None`` as "could not check".
+    On success, ``error_detail`` is ``""``. On failure, ``tag_name`` is ``None`` and
+    ``error_detail`` is a short reason (for diagnostics / logging).
     """
     url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
     req = Request(url, headers={"User-Agent": "SafeCopi update check"})
     try:
         with urlopen(req, timeout=5) as resp:  # type: ignore[call-arg]
             data = resp.read()
-    except (URLError, HTTPError, OSError, ValueError):
-        return None
+    except HTTPError as e:
+        return None, f"http_{e.code}:{e.reason!s}"[:800]
+    except URLError as e:
+        return None, f"url:{e.reason!s}"[:800]
+    except (OSError, ValueError) as e:
+        return None, f"io:{e!s}"[:800]
     try:
         payload = json.loads(data.decode("utf-8", errors="replace"))
-    except (TypeError, ValueError):
-        return None
+    except (TypeError, ValueError) as e:
+        return None, f"json:{e!s}"[:400]
     tag = payload.get("tag_name") or payload.get("name")
     if not isinstance(tag, str) or not tag.strip():
-        return None
-    return tag.strip()
+        return None, "missing_tag_name"
+    return tag.strip(), ""
 
 
 def build_rsync_command_argv(
@@ -892,10 +1020,12 @@ def is_rsync_filename_only_stderr_line(line: str) -> bool:
 
 def should_log_rsync_stderr_line(line: str) -> bool:
     """
-    Return False for lines that would flood the UI log (paths, transfer stat noise).
+    Return True only for stderr lines that should appear in the activity log: rsync
+    diagnostics (``rsync:``) and other probable **errors, warnings, or issues**.
 
-    Call only for lines that did not parse as transfer progress; progress-like lines
-    that failed to parse are still suppressed when they contain ``%`` and a ``/s`` speed.
+    Routine transfer chatter (file lists, ``sent``/``total``/``speedup``, ``done``, etc.)
+    and per-file paths are suppressed — they are not passed here if identified as paths,
+    and benign status lines are rejected below.
     """
     s = line.strip()
     if not s:
@@ -905,33 +1035,58 @@ def should_log_rsync_stderr_line(line: str) -> bool:
     if _rsync_stderr_line_is_probable_file_path(line):
         return False
     low = s.lower()
-    needles = (
-        "building file list",
-        "receiving incremental file list",
-        "receiving file list",
-        "file list done",
-        "rsync:",
-        "sending incremental file list",
-        "sent ",
-        "total ",
-        "speedup is",
-        "created ",
-        "deleting",
-        "skipping",
-        "ignoring",
-        "warning",
-        "error",
-        "cannot",
+    # Benign rsync status (not ``rsync:``-prefixed diagnostics).
+    if low.startswith(
+        (
+            "building file list",
+            "receiving incremental file list",
+            "receiving file list",
+            "sending incremental file list",
+            "file list done",
+        )
+    ) or low.startswith("file list "):
+        return False
+    if low.startswith("created ") and "directory" in low:
+        return False
+    if low.startswith("sent ") or low.startswith("total ") or low.startswith("speedup is"):
+        return False
+    if s == "done" or low.startswith("done "):
+        return False
+
+    if low.startswith("rsync:"):
+        return True
+
+    problem_markers = (
+        " error",
+        "error:",
+        " error:",
+        "warning:",
+        " warning",
+        "fatal",
+        "cannot ",
+        "can't ",
+        "could not ",
         "failed",
+        "failure",
         "timeout",
-        "connection",
-        "permission",
-        "denied",
-        "protocol",
-        "auth",
+        "timed out",
+        "connection reset",
+        "connection refused",
+        "broken pipe",
+        "closed by remote",
+        "unexpected end",
+        "permission denied",
+        "protocol version",
+        " host is down",
+        " no route to host",
+        "network is unreachable",
+        "no space left",
+        " out of disk space",
+        "i/o error",
+        "read errors",
+        "write error",
+        "vanished",
     )
-    if any(n in low for n in needles):
+    if any(m in low for m in problem_markers):
         return True
-    if s == "done" or s.startswith("done "):
-        return True
-    return True
+    return False

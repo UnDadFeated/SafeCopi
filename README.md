@@ -1,52 +1,68 @@
 # SafeCopi
 
-Desktop application for **synchronizing local directories to remote hosts** over SSH using **rsync**. It targets long-running backups and archives: interactive preflight checks, parsed transfer progress, bounded I/O timeouts, and automatic retries on failure.
+<p align="center">
+  <a href="https://github.com/UnDadFeated/SafeCopi/releases"><img src="https://img.shields.io/github/v/release/UnDadFeated/SafeCopi?sort=semver&amp;logo=github&amp;label=release" alt="GitHub release"></a>
+  <a href="https://github.com/UnDadFeated/SafeCopi"><img src="https://img.shields.io/github/stars/UnDadFeated/SafeCopi?style=flat&amp;logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/UnDadFeated/SafeCopi/commits/main/"><img src="https://img.shields.io/github/last-commit/UnDadFeated/SafeCopi/main?logo=github" alt="Last commit"></a>
+  <br>
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&amp;logoColor=white" alt="PySide6">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/rsync-OpenSSH-333333?logo=openssh" alt="rsync over SSH">
+</p>
 
-| Attribute | Details |
+**SafeCopi** is a desktop application for **synchronizing directories to remote hosts** with **OpenSSH** and **rsync**. It is aimed at backups and long-running archive jobs: preflight checks (tree scan, remote free space, SSH connectivity), parsed transfer progress, bounded I/O timeouts, automatic retries, and an activity log with timestamps.
+
+The UI is a fixed-layout, dark-themed window (720×880). **Preflight** and **File transfer** share the main row (~30% / ~70% width). Session options persist via **Qt `QSettings`**; **SSH password fields are never saved to disk**.
+
+---
+
+## Contents
+
+- [Capabilities](#capabilities)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Running](#running)
+- [Usage](#usage)
+- [Development](#development)
+- [Releases & history](#releases--history)
+
+---
+
+## Capabilities
+
+| Area | Behavior |
 | :--- | :--- |
-| Stack | Python 3.10+, PySide6 |
-| Transport | OpenSSH + rsync |
-| Version | [`safecopi/__init__.py`](safecopi/__init__.py) · [`CHANGELOG.md`](CHANGELOG.md) |
+| **Sources** | One or more **local** folders (up to **64**); each appears under the destination by folder name. A **single** remote source `user@host:/path` is supported and **cannot** be combined with extra list entries. |
+| **Preflight** | Optional recursive scan of all listed local trees (counts and byte totals, throttled UI updates). While scanning, path fields, rsync options, **Test SSH**, **Dest. space**, and **Start sync** are disabled. |
+| **Diagnostics** | Append-only **`debug.log`** under Qt’s app config dir (often ``~/.config/SafeCopi/SafeCopi/debug.log`` on Linux when org/app are both ``SafeCopi``): **last 3 app sessions** retained (rotation on startup), **ms-resolution** timestamps, session/settings/preflight/sync milestones, SSH/space/update **error excerpts**, and **shutdown** signals where possible — **not** rsync transfer/file listings. |
 
----
-
-## Overview
-
-SafeCopi wraps a production-style rsync workflow in a fixed-layout, dark-themed window (720×880). It emphasizes **visibility** (source scan, remote free space, SSH test) and **resilience** (`--info=progress2`, optional `--partial`, configurable timeouts and retry delays) without requiring a hand-maintained shell script. **Preflight** and **File transfer** sit **side by side** (~¼ / ~¾ width) to save vertical space. **Source** can be several local folders (each copied under the destination by folder name); **Destination** uses a monospace field with browse; **Src.** / **Dest. password** appear when that side is remote (`user@host:/path`).
-
-Session fields—including paths, dry-run, recursion, bandwidth limit, and extra rsync arguments—persist via `QSettings`. SSH password fields are **never** written to disk. The activity log records **timestamps** on each line; during sync, **session elapsed** wall time appears under the transfer progress bar.
-
----
-
-## Features
-
-- **Preflight** — Walk the source tree for file count and total size (incremental UI updates for slow or network-backed paths). While a scan runs, path fields, rsync options, **Test SSH**, **Dest. space**, and **Start sync** are disabled; **Scan source** / **Stop scan** are centered in the action row. An idle red guide pulse (fixed-width border, no layout jump) steps through **Browse** / **Scan** / destination **Browse**, then **Test SSH** and **Dest. space** when the workflow needs them, then **Start sync**.
-- **Remote space** — Query free space with `df` over SSH, walking to parent paths when the destination directory does not exist yet.
-- **SSH** — Password-capable transport for **source and/or destination** remotes (`PubkeyAuthentication=no` when a password is supplied; `SSH_ASKPASS` / optional `sshpass`). **Test SSH** checks the destination host if remote, else the source host.
-- **Sync** — Builds rsync argv centrally (`--info=progress2`, timeouts, archive-style modes); **If file exists** defaults to skip when name and size match (`--size-only`), with overwrite or skip-by-name (`--ignore-existing`) as alternatives. Multiple **local** sources run as separate rsyncs into the same destination root (each folder name appears under the target); at most **64** source folders are kept (settings load/save and **Add folder** enforce the cap). If the list mixes local paths with a remote `user@host:/path` entry, the guide pulse highlights **Remove** until the configuration is valid. Per-file path lines stay on stderr (with `-v`) so the transfer detail line can show the active file before **Attempt**. Add `--info=name0` under **Extra rsync arguments** to suppress those paths if preferred. Worker loop retries on non-zero exit until success or user stop. **Pause** / **Resume** (between **Start sync** and **Stop**) suspends the running rsync on POSIX (**SIGSTOP** / **SIGCONT**) or defers the next retry until resumed. Path fields, rsync options, **Test SSH**, **Dest. space**, and **Scan source** are disabled for the duration of a run (including between retries); **Start sync** is also disabled during an active **Scan source** run.
-- **Progress** — Parsed rsync progress drives a 0..10000 bar with a rich label (%, **bytes left** vs the last **source scan** total when available, speed, **ETA** from remaining÷throughput or rsync’s ETA); the bar follows **sent ÷ scanned size** when a preflight scan exists, else rsync’s overall percent. The bar is **monotonic** (not per-file `xfr#`, still in the detail line). Progress and per-file path lines from rsync drive the transfer panel; path spam stays out of the activity log.
+| **Guide pulse** | Idle highlight follows setup order: **Add folder** (if no sources) → fix invalid local paths → destination **Browse** when empty → **Scan source** (optional, only after destination is set for local folders) → **Test SSH** / **Check destination space** when needed → **Start sync**. Invalid multi-source mixes (local + remote in one list) target **Remove**. |
+| **Remote space** | `df` over SSH, walking to parents when the destination path does not exist yet. |
+| **SSH** | Password-capable when required (`PubkeyAuthentication=no` with password, `SSH_ASKPASS`, optional `sshpass`). **Test SSH** uses the destination host if remote, otherwise the source host. |
+| **Sync** | Centralized rsync argv (`--info=progress2`, timeouts, archive-style modes). **If file exists** defaults to **Skip (if filename and size is same)** (`--size-only`). Multi-source runs are **sequential** in one session. **Pause** / **Resume** (POSIX **SIGSTOP**/**SIGCONT** or deferred retry). Retries until success, failure, or user stop. |
+| **Progress** | 0–10000 bar with percentage, bytes remaining (vs last scan when available), throughput, and ETA; monotonic behavior. For multi-source sessions, one cumulative bar runs from 0% to 100% across all source folders (no per-source reset). The activity log records **rsync errors/warnings and ``rsync:`` diagnostics** only — not per-file ``-v`` chatter or routine transfer totals. |
 
 ---
 
 ## Requirements
 
-| Dependency | Notes |
-| --- | --- |
-| Python | 3.10 or newer |
-| Packages | [`requirements.txt`](requirements.txt) (PySide6) |
-| System tools | `rsync`, `ssh` on `PATH` |
-| Password auth (optional) | `sshpass` recommended when not using keys; on Arch/CachyOS: `sudo pacman -S sshpass` |
+| Component | Notes |
+| :--- | :--- |
+| **Python** | 3.10 or newer |
+| **Python packages** | [`requirements.txt`](requirements.txt) (PySide6) |
+| **System** | `rsync` and `ssh` on `PATH` |
+| **Optional** | `sshpass` for password-based SSH when keys are not used (e.g. Arch/CachyOS: `sudo pacman -S sshpass`) |
 
-SSH **public keys** are recommended for unattended copies. If authentication fails with repeated “Permission denied”, verify credentials and server policy with `ssh user@host` from a terminal.
+SSH **public keys** are recommended for unattended runs. If you see repeated “Permission denied”, verify with `ssh user@host` in a terminal.
 
 ---
 
 ## Installation
 
-Create a virtual environment and install dependencies (works in **bash**, **zsh**, and **fish** without relying on `activate` for day-to-day runs):
-
 ```bash
-cd /path/to/SafeCopi
+git clone https://github.com/UnDadFeated/SafeCopi.git
+cd SafeCopi
 python -m venv .venv
 .venv/bin/pip install -U pip
 .venv/bin/pip install -r requirements.txt
@@ -54,20 +70,20 @@ python -m venv .venv
 
 Alternatively, from the repository root:
 
-```sh
+```bash
 ./bootstrap
 ```
 
-**Fish:** Do not `source .venv/bin/activate` (that file targets bash/zsh). Prefer `.venv/bin/python` directly, or `source .venv/bin/activate.fish` only if you want a traditional activate workflow.
+**Fish:** Prefer `.venv/bin/python` directly, or `source .venv/bin/activate.fish`. Do not use the bash-oriented `activate` script.
 
-**PEP 668 (e.g. Arch):** Use the venv interpreter explicitly (`.venv/bin/pip`, `.venv/bin/python`) so installs do not hit the system-managed environment error.
+**PEP 668 (system Python, e.g. Arch):** Always install into the venv (`.venv/bin/pip`, `.venv/bin/python`).
 
 ---
 
-## Running the application
+## Running
 
 ```bash
-cd /path/to/SafeCopi
+cd SafeCopi
 .venv/bin/python -m safecopi
 ```
 
@@ -81,21 +97,21 @@ Or, after `chmod +x run-safecopi`:
 
 ## Usage
 
-1. **Source** — One or more **local** folders (**Add folder…**); with several entries, each is synced as `dest/FolderName/…`. A single **user@host:/path** remote source is still allowed (not combinable with extra list entries).
-2. **Destination** — Rsync-style URI, e.g. `user@host:/mnt/backup/Archive/`.
-3. **Trailing slash** — Rsync semantics differ for `path` vs `path/`; the hint under Preflight still applies to paths you type.
-4. **Check destination space** — Recommended before large runs.
-5. **Scan source** — Optional; walks all listed local folders and **sums** counts/sizes, with periodic UI updates (~250 files or ~200 ms). Totals reflect `getsize` sums (may differ slightly from `du` for sparse or special files).
+1. **Source** — Add one or more **local** directories. With multiple entries, each syncs to `destination/FolderName/…`. One **user@host:/path** remote source is allowed **alone** (not with extra list rows).
+2. **Destination** — Rsync-style target, e.g. `user@host:/mnt/backup/Archive/`.
+3. **Trailing slashes** — Rsync semantics differ for `path` vs `path/`; see the in-app Preflight note when typing paths.
+4. **Check destination space** — Recommended before large transfers.
+5. **Scan source** — Optional; aggregates all listed local trees. Totals use file sizes (may differ slightly from `du` for sparse or special files).
 6. **Dry run** — Adds `--dry-run` (no writes).
-7. **Subdirectories** — Recursive copy (`-ah`) is default; disabling limits to the top level (`-hlptgoD` without `-r`).
-8. **Partial files** — Choose resume (`--partial`) or full re-copy of interrupted files on the next run.
-9. **Sync log** — High-signal lines only; paths and progress noise are filtered from the activity log while stderr still supplies per-file lines for the transfer detail (add `--info=name0` in extra args to hide those paths from both rsync and the UI).
+7. **Subdirectories** — Recursive copy (`-ah`) is the default; turning it off limits to the top level (`-hlptgoD` without `-r`).
+8. **Partial files** — Choose `--partial` for resumable interrupted files where appropriate.
+9. **Extra rsync arguments** — Append flags as needed; add `--info=name0` to reduce per-file path verbosity in the UI if desired.
 
 ---
 
 ## Development
 
-Install test dependencies and run the suite headlessly:
+Install dev dependencies and run tests headlessly:
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
@@ -104,24 +120,15 @@ QT_QPA_PLATFORM=offscreen .venv/bin/pytest tests/
 
 ---
 
-## GitHub repository metadata
+## Releases & history
 
-Use the following in the repository **About** settings (description, topics, and optional website).
+- **Current version:** [`safecopi/__init__.py`](safecopi/__init__.py) (`__version__`)
+- **Release notes:** [`CHANGELOG.md`](CHANGELOG.md)
 
-**Description** (copy into the *Description* field, ≤350 characters):
-
-```text
-Desktop app to sync local directories to remote paths over SSH with rsync—progress UI, retries, timeouts, and preflight checks (space, SSH). Built with Python and PySide6.
-```
-
-**Topics** (suggested):
-
-`rsync` `ssh` `backup` `sync` `pyside6` `pyqt` `python` `linux` `gui` `file-transfer`
-
-**Website** (optional): leave blank or set to the repository URL if you do not publish a separate site.
+**Suggested GitHub topics:** `rsync`, `ssh`, `backup`, `sync`, `pyside6`, `pyqt`, `python`, `linux`, `gui`, `file-transfer`
 
 ---
 
-## Changelog
-
-Release history: [`CHANGELOG.md`](CHANGELOG.md).
+<p align="center">
+  <sub>Repository: <a href="https://github.com/UnDadFeated/SafeCopi">github.com/UnDadFeated/SafeCopi</a></sub>
+</p>

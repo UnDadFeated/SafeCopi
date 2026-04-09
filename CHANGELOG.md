@@ -1,5 +1,110 @@
 # Changelog
 
+## [1.7.9] - 2026-04-09
+
+### Fixed
+
+- **Multi-source transfer progress**: The File transfer progress bar no longer resets between sequential rsync runs when several source folders are selected. Progress now advances cumulatively from 0% to 100% for the full session, carrying completed work forward across source boundaries while preserving scan-based ETA/remaining calculations.
+
+## [1.7.8] - 2026-04-08
+
+### Changed
+
+- **Main window layout**: Preflight/File transfer row adjusted to a **30% / 70%** horizontal split while preserving matched minimum heights.
+
+## [1.7.7] - 2026-04-08
+
+### Changed
+
+- **Main window layout**: Preflight/File transfer row reverted to a **25% / 75%** horizontal split while preserving matched minimum heights. The trailing-slash note is again shown inside **Preflight** (beneath Source scan).
+
+## [1.7.6] - 2026-04-08
+
+### Fixed
+
+- **Transfer progress with skip modes**: When **If file exists** is set to a skip policy (`--size-only` or `--ignore-existing`), progress now treats skipped files as completed work against the preflight scan total. The bar and remaining-bytes/ETA estimate no longer stall while rsync checks and skips unchanged destination files.
+- **Qt disconnect warnings**: Cleanup paths no longer issue blanket `QObject.disconnect(...)` calls on short-lived scan/process objects, preventing repeated terminal warnings such as `QObject::disconnect: Unexpected nullptr parameter`.
+
+## [1.7.5] - 2026-04-08
+
+### Changed
+
+- **Main window layout**: Preflight and File transfer share equal horizontal stretch with matched minimum heights. The trailing-slash hint was removed from the Preflight box (folded into the Source list tooltip). The scan row uses a **Source scan** label and tooltip explaining the idle dash versus the live progress bar. **Rsync** controls use a denser grid-style layout (delays, options, partial policy, if-exists, then BW limit and extra args on one horizontal row). Command preview minimum height is reduced; the activity log receives greater vertical stretch relative to the preview.
+- **Transfer detail line**: Detail text order is **Elapsed → Attempt → bytes/stats → current file last** so the attempt counter does not shift when the filename changes.
+
+## [1.7.4] - 2026-04-08
+
+### Fixed
+
+- **Source scan / guide pulse**: After a scan finished, ``QThread.deleteLater()`` could destroy the C++ thread while ``MainWindow._scan_thread`` still pointed at the Python wrapper, causing ``RuntimeError: Internal C++ object (PySide6.QtCore.QThread) already deleted`` on ``isRunning()`` (e.g. when adding folders or pulsing the guide). The scan thread now connects ``finished → _on_scan_thread_finished`` to clear ``_scan_thread``. All ``QThread`` / ``QProcess`` busy checks use safe helpers that catch ``RuntimeError`` and clear stale refs; ``quit()`` uses the same pattern.
+
+## [1.7.3] - 2026-04-08
+
+### Changed
+
+- **Activity log**: Rsync stderr is no longer treated as “log unless it looks like a path.” Only **``rsync:``** diagnostic lines and lines matching **error / warning / failure / network / disk / I/O** heuristics are appended; routine status (``building file list``, ``sent``/``total``/``speedup``, ``created`` directory, ``done``, etc.) is suppressed. SafeCopi’s own messages (attempt banners, pause/resume, ``[SafeCopi]`` notices) are unchanged.
+
+## [1.7.2] - 2026-04-08
+
+### Fixed
+
+- **Dest. space (remote)**: Regressed after **1.5.9** when **1.6.x** moved the remote ``df`` call off the GUI thread onto ``DestSpaceWorker`` / ``QThread`` (see **1.6.0** changelog: “GUI freeze during preflight”). The worker’s ``run`` slot did not reliably run on some setups (``debug.log`` showed ``SPACE ui_check_start`` but never ``check_start``). **Remote** free space again uses the same **``QProcess`` + watchdog timer** pattern as **Test SSH** (GUI thread, ``SSH_ASKPASS``/``sshpass`` env, explicit kill on timeout), so the queue completes and dialogs appear. **Local** destinations still use a short **``QThread``** with **``Qt.DirectConnection``** for ``started → run`` and a bounded ``local_free_bytes`` timeout.
+
+### Changed
+
+- **``debug.log``**: Millisecond timestamps; on each app launch, **only the last 3 sessions** (lines containing ``[SESSION] start``) are kept, with a ``[LOG] rotated`` line when older sessions are dropped; lines are **fsync**’d to improve survival on crash. **Shutdown hooks**: ``about_to_quit``, ``atexit``, and (POSIX) **``SIGTERM``** / **``SIGINT``** log ``APP`` events — **``SIGKILL``** cannot be caught. **Diagnostics**: SSH test failures and timeouts log **stderr/stdout excerpts**; remote space logs **``qprocess_*``** stages, nonzero exits, and timeouts; GitHub update check logs **structured network/HTTP errors** when the tag cannot be fetched.
+
+## [1.7.1] - 2026-04-08
+
+### Fixed
+
+- **Dest. space (remote/local)**: ``debug.log`` showed ``SPACE ui_check_start`` with no ``check_start`` / ``check_done``, matching an indefinite hang. ``QThread.started`` → worker ``run`` now uses ``Qt.QueuedConnection`` so the slot runs on the worker thread’s event loop (consistent with reliable delivery). ``debug_log`` no longer holds the process-wide lock while appending to the file, so a slow or stuck config volume cannot block the GUI or the space worker. Remote ``df`` uses a dedicated subprocess overhead cap (``SSH_DF_SUBPROCESS_OVERHEAD_SEC``) and POSIX ``start_new_session`` so ``subprocess`` timeouts can tear down ``ssh``/``sshpass`` cleanly. Local free-space queries use a bounded wait (derived from **I/O timeout**, max 180s) via ``ThreadPoolExecutor`` so bad mounts cannot hang forever.
+
+## [1.7.0] - 2026-04-07
+
+### Added
+
+- **Diagnostics**: Append-only **`debug.log`** (lowercase) under the app config directory (Qt ``AppConfigLocation``, typically ``~/.config/SafeCopi/debug.log`` on Linux). Logs session start, settings load/persist, UI lifecycle (window ready, close), scan/SSH/destination-space/update-check flows, sync start/stop/pause, and **rsync worker** state (**configure**, each **attempt**, **retry scheduling**, **pause/resume**, multi-source segment boundaries, abnormal exit, pipe anomalies) — **not** per-file rsync stderr/stdout or transfer progress lines. Module: ``safecopi.debug_log``.
+
+## [1.6.6] - 2026-04-07
+
+### Fixed
+
+- **Test SSH**: Running the check on a background ``QThread`` broke ``SSH_ASKPASS`` / PySide password UI and prevented the success/failure ``QMessageBox`` from appearing reliably. **Test SSH** now uses ``QProcess`` on the GUI thread (with the same argv/env as ``run_ssh_command``) plus a watchdog timer, so the event loop stays responsive and dialogs match the pre–1.6.3 behavior. **Dest. space** remains on ``DestSpaceWorker``.
+
+### Changed
+
+- **If file exists**: Combo label **Skip (if filename and size is same)** (was “name”); default index is set explicitly to ``skip_name_size`` after populating the list. Tooltip wording aligned.
+- **Internals**: ``SSH_TEST_CONNECT_TIMEOUT_SEC`` in ``utils`` matches **Test SSH** ``QProcess`` watchdog duration with ``run_ssh_command``; ``_qprocess_environment_from_environ_dict`` merges ``ssh_command_environment`` output for ``QProcess``.
+
+## [1.6.5] - 2026-04-07
+
+### Fixed
+
+- **Guide pulse**: Reordered the idle checklist so it matches setup and preflight: **destination** is highlighted when empty **before** **Scan source**. Previously, all-local sources with no scan yet pulsed **Scan** even when the destination field was empty, which looked like a skipped step and caused confusing blinking. **Scan** is only suggested after the destination is set (still optional). Remote-only source flows skip **Scan** and continue to **Test SSH** as before.
+
+### Changed
+
+- **Documentation**: README guide-pulse row updated to describe the new order.
+
+## [1.6.4] - 2026-04-07
+
+### Fixed
+
+- **Check for update**: GitHub API access ran on the GUI thread (up to the HTTP timeout), which could freeze the window briefly. The request now runs in a background ``QThread`` via ``GitHubUpdateCheckWorker``; **Check for update…** disables until the thread finishes, and quit is blocked while a check is in flight.
+
+## [1.6.3] - 2026-04-07
+
+### Fixed
+
+- **GUI freeze during preflight**: **Dest. space** and **Test SSH** ran blocking ``subprocess``/SSH calls on the Qt GUI thread (remote ``df`` can wait up to ``connect_timeout + 120`` seconds), which made the window appear stuck while the OS still allowed moving it. Both checks now run on a background ``QThread`` via ``DestSpaceWorker`` and ``SshTestWorker`` (same repatriation pattern as source scan); **Dest. space** / **Test SSH** disable only while their own job runs. Quit is blocked until these finish, matching scan/sync behavior.
+
+## [1.6.2] - 2026-04-07
+
+### Changed
+
+- **Documentation**: README rewritten for GitHub with centered badge row (release, stars, last commit, Python, PySide6, platform, stack), table-driven capabilities and requirements, clearer structure (contents, installation, usage, development), and consolidated repository links.
+
 ## [1.6.1] - 2026-04-07
 
 ### Added

@@ -6,21 +6,26 @@ from safecopi.utils import (
     EXISTING_FILES_MODE_DEFAULT,
     EXTRA_RSYNC_ARG_COUNT_MAX,
     EXTRA_RSYNC_ARG_LINE_MAX_CHARS,
+    RemoteTarget,
     build_rsync_command_argv,
+    build_ssh_command_argv,
+    canonical_rsync_path,
     existing_files_mode_rsync_argv,
-    normalize_existing_files_mode,
     format_rsync_hms_for_display,
     format_seconds_as_hms_display,
     human_bytes,
     humanize_rsync_progress_stats,
     is_rsync_filename_only_stderr_line,
+    normalize_existing_files_mode,
     parse_extra_rsync_args,
+    parse_rsync_destination,
     parse_rsync_progress2_line,
     parse_rsync_speed_to_bytes_per_sec,
     parse_rsync_transferred_amount_token,
     parse_rsync_transfer_progress_line,
     parse_rsync_xfr_count,
     should_log_rsync_stderr_line,
+    ssh_command_environment,
 )
 
 
@@ -61,6 +66,71 @@ def test_existing_files_mode_rsync_argv() -> None:
     assert existing_files_mode_rsync_argv("overwrite") == []
     assert existing_files_mode_rsync_argv("skip_name_size") == ["--size-only"]
     assert existing_files_mode_rsync_argv("skip_name") == ["--ignore-existing"]
+
+
+def test_parse_rsync_destination_sftp_url() -> None:
+    r, path = parse_rsync_destination("sftp://alice@files.example.com/var/www")
+    assert r is not None
+    assert r.user == "alice"
+    assert r.host == "files.example.com"
+    assert path == "/var/www"
+    assert r.to_rsync_uri() == "alice@files.example.com:/var/www"
+
+
+def test_parse_rsync_destination_sftp_url_no_user() -> None:
+    r, path = parse_rsync_destination("sftp://backup.host/data")
+    assert r is not None
+    assert r.user is None
+    assert r.host == "backup.host"
+    assert path == "/data"
+
+
+def test_canonical_rsync_path_sftp_matches_to_rsync_uri() -> None:
+    u = "sftp://u@h.example/mnt/backup/"
+    assert canonical_rsync_path(u) == "u@h.example:/mnt/backup/"
+
+
+def test_canonical_rsync_path_local_unchanged() -> None:
+    assert canonical_rsync_path("  /home/me/foo  ") == "/home/me/foo"
+
+
+def test_build_ssh_command_argv_echo_ok() -> None:
+    r = RemoteTarget(host="example.com", path="/data", user="me")
+    argv = build_ssh_command_argv(
+        r,
+        "echo ok",
+        connect_timeout=11,
+        batch_mode=False,
+        password_for_sshpass=None,
+    )
+    assert argv[0] == "ssh"
+    assert "me@example.com" in argv
+    assert argv[-1] == "echo ok"
+
+
+def test_ssh_command_environment_merges_extra_without_askpass_when_sshpass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sshpass path must not apply GUI askpass keys from extra_env."""
+    monkeypatch.delenv("SSH_ASKPASS", raising=False)
+    monkeypatch.delenv("SSH_ASKPASS_REQUIRE", raising=False)
+    env = ssh_command_environment(
+        {"SSH_ASKPASS": "/fake/askpass", "SSH_ASKPASS_REQUIRE": "force", "FOO": "bar"},
+        password_for_sshpass="secret",
+    )
+    assert env["SSHPASS"] == "secret"
+    assert env["FOO"] == "bar"
+    assert "SSH_ASKPASS" not in env
+    assert "SSH_ASKPASS_REQUIRE" not in env
+
+
+def test_ssh_command_environment_updates_extra_when_no_sshpass() -> None:
+    env = ssh_command_environment(
+        {"SSH_ASKPASS": "/x", "SSH_ASKPASS_REQUIRE": "force"},
+        password_for_sshpass=None,
+    )
+    assert env["SSH_ASKPASS"] == "/x"
+    assert env["SSH_ASKPASS_REQUIRE"] == "force"
 
 
 def test_parse_extra_rsync_args_line_too_long() -> None:
@@ -214,12 +284,15 @@ def test_is_rsync_filename_only_stderr_line() -> None:
 
 
 def test_should_log_rsync_stderr_line() -> None:
-    assert should_log_rsync_stderr_line("building file list ...")
-    assert should_log_rsync_stderr_line("created 1 directory for /tmp/foo/bar")
+    assert not should_log_rsync_stderr_line("building file list ...")
+    assert not should_log_rsync_stderr_line("created 1 directory for /tmp/foo/bar")
     assert should_log_rsync_stderr_line("rsync: connection reset")
+    assert should_log_rsync_stderr_line("rsync: warning: skipping symlink")
+    assert should_log_rsync_stderr_line("Permission denied (publickey).")
     assert not should_log_rsync_stderr_line("Photos/JC1.jpg")
     assert not should_log_rsync_stderr_line("Photos/subdir/")
     assert not should_log_rsync_stderr_line("archive/deleting/old/img.jpg")
     assert not should_log_rsync_stderr_line(
         "         32.77K   0%    0.00kB/s    0:00:00"
     )
+    assert not should_log_rsync_stderr_line("Some innocuous status line without markers.")

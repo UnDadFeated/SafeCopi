@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtWidgets import QMessageBox
 
 from safecopi.main_window import MainWindow
-from safecopi.utils import build_rsync_command_argv
+from safecopi.utils import RsyncProgressSnapshot, build_rsync_command_argv
 
 
 @pytest.fixture
@@ -57,6 +57,47 @@ def test_preflight_warnings_requires_destination(tmp_path, qtbot, offscreen_env)
     assert "destination" in mock_warn.call_args[0][2].lower()
 
 
+def test_get_guide_target_browse_dest_before_scan_when_dest_empty(
+    tmp_path, qtbot, offscreen_env
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._source_list.clear()
+    w._source_list.addItem(str(src) + "/")
+    w._dest.clear()
+    w._last_scan = (None, None)
+    assert w._get_guide_target() is w._btn_browse_dest
+
+
+def test_get_guide_target_remote_source_goes_to_ssh_not_scan(
+    qtbot, offscreen_env,
+) -> None:
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._source_list.clear()
+    w._source_list.addItem("user@example.com:/data/")
+    w._dest.setText("/mnt/backup/")
+    w._last_scan = (None, None)
+    w._ssh_ok_this_session = False
+    assert w._get_guide_target() is w._btn_ssh
+
+
+def test_get_guide_target_scan_after_dest_when_local_not_scanned(
+    tmp_path, qtbot, offscreen_env
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._source_list.clear()
+    w._source_list.addItem(str(src) + "/")
+    w._dest.setText("/tmp/dest/")
+    w._last_scan = (None, None)
+    assert w._get_guide_target() is w._btn_scan
+
+
 def test_get_guide_target_mixed_local_remote_points_remove(
     tmp_path, qtbot, offscreen_env
 ) -> None:
@@ -92,3 +133,77 @@ def test_recursive_subdirs_default_on(qtbot, offscreen_env) -> None:
         recursive=w._recursive_subdirs.isChecked(),
     )
     assert "-hlptgoD" in argv_flat
+
+
+def test_progress_done_bytes_counts_skipped_when_skip_mode_enabled(
+    qtbot, offscreen_env
+) -> None:
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._last_scan = (100, 1_000)
+    idx = w._combo_existing_files.findData("skip_name")
+    w._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
+    snap = RsyncProgressSnapshot(
+        percent=60,
+        elapsed="0:00:10",
+        speed="10.00MiB/s",
+        eta="0:00:04",
+        stats_raw="",
+        stats_human="",
+        transferred_bytes=100,
+    )
+    assert w._sync_transfer_bar_units(snap) == 6000
+
+
+def test_progress_done_bytes_uses_transferred_in_overwrite_mode(
+    qtbot, offscreen_env
+) -> None:
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._last_scan = (100, 1_000)
+    idx = w._combo_existing_files.findData("overwrite")
+    w._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
+    snap = RsyncProgressSnapshot(
+        percent=60,
+        elapsed="0:00:10",
+        speed="10.00MiB/s",
+        eta="0:00:04",
+        stats_raw="",
+        stats_human="",
+        transferred_bytes=100,
+    )
+    assert w._sync_transfer_bar_units(snap) == 1000
+
+
+def test_multi_source_progress_keeps_cumulative_baseline(qtbot, offscreen_env) -> None:
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._last_scan = (100, 1_000)
+    w._sync_total_source_runs = 2
+    w._sync_current_source_estimate_bytes = 500
+    w._on_rsync_source_run_changed(1, 2)
+    idx = w._combo_existing_files.findData("skip_name")
+    w._combo_existing_files.setCurrentIndex(0 if idx < 0 else idx)
+
+    snap1 = RsyncProgressSnapshot(
+        percent=100,
+        elapsed="0:00:10",
+        speed="10.00MiB/s",
+        eta="0:00:00",
+        stats_raw="",
+        stats_human="",
+        transferred_bytes=100,
+    )
+    assert w._sync_transfer_bar_units(snap1) == 5000
+
+    w._on_rsync_source_run_changed(2, 2)
+    snap2 = RsyncProgressSnapshot(
+        percent=50,
+        elapsed="0:00:20",
+        speed="10.00MiB/s",
+        eta="0:00:10",
+        stats_raw="",
+        stats_human="",
+        transferred_bytes=20,
+    )
+    assert w._sync_transfer_bar_units(snap2) == 7500

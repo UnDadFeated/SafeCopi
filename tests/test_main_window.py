@@ -25,12 +25,12 @@ def test_main_window_construct_show_close(qtbot, offscreen_env) -> None:
     w.close()
 
 
-def test_collect_rsync_modifiers_includes_bw(qtbot, offscreen_env) -> None:
+def test_collect_rsync_modifiers_for_source_includes_bw(qtbot, offscreen_env) -> None:
     w = MainWindow()
     qtbot.addWidget(w)
     w._bwlimit.setValue(100)
     w._dry_run.setChecked(True)
-    args = w._collect_rsync_modifiers()
+    args = w._collect_rsync_modifiers_for_source(0)
     assert "--bwlimit=100" in args
     assert "--dry-run" in args
 
@@ -53,6 +53,26 @@ def test_source_for_sync_single_local_strips_trailing_slash(
     out = w._source_for_sync(str(d) + "/")
     assert out.endswith("/Sofie Backup")
     assert not out.endswith("/Sofie Backup/")
+
+
+def test_source_for_sync_remote_multi_strips_trailing_slash(
+    qtbot, offscreen_env,
+) -> None:
+    w = MainWindow()
+    qtbot.addWidget(w)
+    u = "user@h.example:/mnt/backup/Macie Backup/"
+    out = w._source_for_sync(u, multi_source=True)
+    assert out == "user@h.example:/mnt/backup/Macie Backup"
+
+
+def test_source_for_sync_remote_single_preserves_trailing_slash(
+    qtbot, offscreen_env,
+) -> None:
+    w = MainWindow()
+    qtbot.addWidget(w)
+    u = "user@h.example:/mnt/backup/Macie Backup/"
+    out = w._source_for_sync(u, multi_source=False)
+    assert out.endswith("Macie Backup/")
 
 
 def test_preflight_warnings_requires_destination(tmp_path, qtbot, offscreen_env) -> None:
@@ -108,7 +128,7 @@ def test_get_guide_target_start_after_dest_when_local_ready(
     assert w._get_guide_target() is w._btn_start
 
 
-def test_get_guide_target_mixed_local_remote_points_remove(
+def test_get_guide_target_mixed_local_remote_points_ssh_when_dest_remote(
     tmp_path, qtbot, offscreen_env
 ) -> None:
     local = tmp_path / "a"
@@ -119,7 +139,8 @@ def test_get_guide_target_mixed_local_remote_points_remove(
     d._source_list.addItem(str(local) + "/")
     d._source_list.addItem("user@example.com:/remote/")
     d._dest.setText("user@example.com:/dest/")
-    assert d._get_guide_target() is d._btn_remove_source
+    d._ssh_ok_this_session = False
+    assert d._get_guide_target() is d._btn_ssh
 
 
 def test_recursive_subdirs_default_on(qtbot, offscreen_env) -> None:
@@ -130,7 +151,7 @@ def test_recursive_subdirs_default_on(qtbot, offscreen_env) -> None:
         "/a",
         "b:/c",
         30,
-        w._collect_rsync_modifiers(),
+        w._collect_rsync_modifiers_for_source(0),
         recursive=w._recursive_subdirs.isChecked(),
     )
     assert "-ah" in argv
@@ -139,7 +160,7 @@ def test_recursive_subdirs_default_on(qtbot, offscreen_env) -> None:
         "/a",
         "b:/c",
         30,
-        w._collect_rsync_modifiers(),
+        w._collect_rsync_modifiers_for_source(0),
         recursive=w._recursive_subdirs.isChecked(),
     )
     assert "-hlptgoD" in argv_flat
@@ -162,10 +183,9 @@ def test_sync_transfer_bar_units_follows_rsync_percent(
     assert w._sync_transfer_bar_units(snap) == 6000
 
 
-def test_multi_source_progress_weighted_across_sources(qtbot, offscreen_env) -> None:
+def test_multi_source_progress_is_per_source_not_session_wide(qtbot, offscreen_env) -> None:
     w = MainWindow()
     qtbot.addWidget(w)
-    w._sync_total_source_runs = 2
     w._on_rsync_source_run_changed(1, 2)
 
     snap1 = RsyncProgressSnapshot(
@@ -177,7 +197,7 @@ def test_multi_source_progress_weighted_across_sources(qtbot, offscreen_env) -> 
         stats_human="",
         transferred_bytes=100,
     )
-    assert w._sync_transfer_bar_units(snap1) == 5000
+    assert w._sync_transfer_bar_units(snap1) == 10_000
 
     w._on_rsync_source_run_changed(2, 2)
     snap2 = RsyncProgressSnapshot(
@@ -189,7 +209,7 @@ def test_multi_source_progress_weighted_across_sources(qtbot, offscreen_env) -> 
         stats_human="",
         transferred_bytes=20,
     )
-    assert w._sync_transfer_bar_units(snap2) == 7500
+    assert w._sync_transfer_bar_units(snap2) == 5000
 
 
 def test_check_dest_space_local_updates_label(tmp_path, qtbot, offscreen_env) -> None:

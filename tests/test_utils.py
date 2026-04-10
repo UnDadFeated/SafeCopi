@@ -7,6 +7,7 @@ from safecopi.utils import (
     EXTRA_RSYNC_ARG_COUNT_MAX,
     EXTRA_RSYNC_ARG_LINE_MAX_CHARS,
     RemoteTarget,
+    RSYNC_RECEIVER_TEMP_SUBDIR,
     build_rsync_command_argv,
     build_ssh_command_argv,
     canonical_rsync_path,
@@ -19,6 +20,7 @@ from safecopi.utils import (
     local_free_bytes,
     normalize_existing_files_mode,
     parse_extra_rsync_args,
+    clamp_monotonic_data_left_bytes,
     estimate_rsync_total_bytes_from_progress,
     parse_rsync_destination,
     parse_rsync_eta_token_to_seconds,
@@ -28,8 +30,10 @@ from safecopi.utils import (
     parse_rsync_transferred_amount_token,
     parse_rsync_transfer_progress_line,
     parse_rsync_xfr_count,
+    remote_rsync_uri_strip_trailing_slashes,
     should_log_rsync_stderr_line,
     ssh_command_environment,
+    ensure_local_rsync_receiver_temp_dir,
 )
 
 
@@ -98,6 +102,17 @@ def test_canonical_rsync_path_local_unchanged() -> None:
     assert canonical_rsync_path("  /home/me/foo  ") == "/home/me/foo"
 
 
+def test_remote_rsync_uri_strip_trailing_slashes() -> None:
+    u = "alice@nas:/mnt/media_hdd/Backup/Macie Backup/"
+    assert remote_rsync_uri_strip_trailing_slashes(u) == (
+        "alice@nas:/mnt/media_hdd/Backup/Macie Backup"
+    )
+    assert remote_rsync_uri_strip_trailing_slashes(
+        "alice@nas:/mnt/media_hdd/Backup/Macie Backup"
+    ) == ("alice@nas:/mnt/media_hdd/Backup/Macie Backup")
+    assert remote_rsync_uri_strip_trailing_slashes("alice@nas:/") == "alice@nas:/"
+
+
 def test_build_ssh_command_argv_echo_ok() -> None:
     r = RemoteTarget(host="example.com", path="/data", user="me")
     argv = build_ssh_command_argv(
@@ -147,11 +162,19 @@ def test_parse_extra_rsync_args_too_many_tokens() -> None:
         parse_extra_rsync_args(" ".join("x" for _ in range(EXTRA_RSYNC_ARG_COUNT_MAX + 1)))
 
 
+def test_ensure_local_rsync_receiver_temp_dir_creates_subdir(tmp_path) -> None:
+    dest = str(tmp_path / "backup") + "/"
+    ensure_local_rsync_receiver_temp_dir(dest)
+    assert (tmp_path / "backup" / RSYNC_RECEIVER_TEMP_SUBDIR).is_dir()
+
+
 def test_build_rsync_command_argv_order() -> None:
     argv = build_rsync_command_argv("/a", "b:/c", 30, ["--dry-run", "-e", "ssh -S none"])
     assert argv[0] == "rsync"
     assert "-ah" in argv
     assert "--no-inc-recursive" in argv
+    assert "--temp-dir=/tmp" in argv
+    assert f"--temp-dir={RSYNC_RECEIVER_TEMP_SUBDIR}" not in argv
     assert "--timeout=30" in argv
     assert "--dry-run" in argv
     assert argv[-2] == "/a"
@@ -176,6 +199,14 @@ def test_build_rsync_command_argv_non_recursive() -> None:
     assert "-hlptgoD" in argv
     assert "-ah" not in argv
     assert "--no-inc-recursive" not in argv
+    assert f"--temp-dir={RSYNC_RECEIVER_TEMP_SUBDIR}" in argv
+    assert f"--filter=protect {RSYNC_RECEIVER_TEMP_SUBDIR}/" in argv
+
+
+def test_build_rsync_local_dest_uses_receiver_subdir_not_tmp() -> None:
+    argv = build_rsync_command_argv("/src/", "/mnt/nas/", 60, [])
+    assert f"--temp-dir={RSYNC_RECEIVER_TEMP_SUBDIR}" in argv
+    assert "--temp-dir=/tmp" not in argv
 
 
 def test_parse_rsync_progress2_line() -> None:
@@ -235,6 +266,15 @@ def test_estimate_rsync_total_bytes_from_progress() -> None:
     assert estimate_rsync_total_bytes_from_progress(100, 100) == 100
     assert estimate_rsync_total_bytes_from_progress(100, 0) is None
     assert estimate_rsync_total_bytes_from_progress(None, 50) is None
+
+
+def test_clamp_monotonic_data_left_bytes() -> None:
+    assert clamp_monotonic_data_left_bytes(None, 100, 0, 50) == (None, None, None)
+    assert clamp_monotonic_data_left_bytes(900, 100, None, None) == (900, 100, 900)
+    assert clamp_monotonic_data_left_bytes(500, 200, 100, 900) == (500, 200, 500)
+    assert clamp_monotonic_data_left_bytes(800, 200, 100, 900) == (800, 200, 800)
+    assert clamp_monotonic_data_left_bytes(950, 200, 100, 900) == (800, 200, 800)
+    assert clamp_monotonic_data_left_bytes(700, 50, 200, 400) == (700, 50, 700)
 
 
 def test_parse_rsync_transferred_amount_token() -> None:

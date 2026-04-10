@@ -6,7 +6,7 @@ import os
 import re
 import signal
 from dataclasses import replace
-from typing import Dict, List, Optional
+from typing import Callable, List, Optional
 
 from PySide6.QtCore import (
     QCoreApplication,
@@ -23,6 +23,7 @@ from safecopi.utils import (
     RSYNC_RETRY_WAIT_SEC_MAX,
     RSYNC_TIMEOUT_SEC_MAX,
     build_rsync_command_argv,
+    ensure_local_rsync_receiver_temp_dir,
     fetch_latest_github_version,
     is_rsync_filename_only_stderr_line,
     local_free_bytes,
@@ -118,8 +119,11 @@ class RsyncWorker(QObject):
         self._timeout_sec = 60
         self._retry_wait_sec = 15
         self._extra_args: List[str] = []
+        self._extra_args_per_source: Optional[List[List[str]]] = None
         self._recursive: bool = True
-        self._env: Optional[QProcessEnvironment] = None
+        self._environment_for_source_index: Optional[
+            Callable[[int], QProcessEnvironment]
+        ] = None
         self._stdout_linebuf: str = ""
         self._stderr_linebuf: str = ""
         self._transfer_os_paused: bool = False
@@ -204,6 +208,7 @@ class RsyncWorker(QObject):
         retry_wait_sec: int,
         extra_args: Optional[List[str]] = None,
         *,
+        extra_args_per_source: Optional[List[List[str]]] = None,
         recursive: bool = True,
     ) -> None:
         self._sources = [s.strip() for s in sources if s.strip()]
@@ -223,6 +228,16 @@ class RsyncWorker(QObject):
         self._timeout_sec = max(1, min(to, RSYNC_TIMEOUT_SEC_MAX))
         self._retry_wait_sec = max(1, min(rw, RSYNC_RETRY_WAIT_SEC_MAX))
         self._extra_args = list(extra_args or [])
+        self._extra_args_per_source = (
+            [list(row) for row in extra_args_per_source]
+            if extra_args_per_source is not None
+            else None
+        )
+        if (
+            self._extra_args_per_source is not None
+            and len(self._extra_args_per_source) != len(self._sources)
+        ):
+            self._extra_args_per_source = None
         self._recursive = recursive
         self._attempt = 1
         self._stop_requested = False
@@ -240,8 +255,12 @@ class RsyncWorker(QObject):
             recursive=self._recursive,
         )
 
-    def set_process_environment(self, env: QProcessEnvironment) -> None:
-        self._env = env
+    def set_environment_for_source_index(
+        self,
+        factory: Optional[Callable[[int], QProcessEnvironment]],
+    ) -> None:
+        """When set, each rsync attempt uses ``factory(source_index)`` as the process environment."""
+        self._environment_for_source_index = factory
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -348,8 +367,12 @@ class RsyncWorker(QObject):
             old.deleteLater()
 
         self._process = QProcess(self)
-        if self._env is not None:
-            self._process.setProcessEnvironment(self._env)
+        if self._environment_for_source_index is not None:
+            self._process.setProcessEnvironment(
+                self._environment_for_source_index(self._source_index)
+            )
+        else:
+            self._process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
         # Same as ssh subprocess: avoid inherited TTY so SSH uses SSH_ASKPASS for rsync transport.
         self._process.setStandardInputFile(QProcess.nullDevice())
 
@@ -357,11 +380,18 @@ class RsyncWorker(QObject):
         self._process.readyReadStandardError.connect(self._on_stderr)
         self._process.finished.connect(self._on_finished)
 
+        if self._extra_args_per_source is not None and self._source_index < len(
+            self._extra_args_per_source
+        ):
+            mod_args = self._extra_args_per_source[self._source_index]
+        else:
+            mod_args = self._extra_args
+        ensure_local_rsync_receiver_temp_dir(self._dest)
         argv = build_rsync_command_argv(
             argv_src,
             self._dest,
             self._timeout_sec,
-            self._extra_args,
+            mod_args,
             recursive=self._recursive,
         )
         program, args = argv[0], argv[1:]

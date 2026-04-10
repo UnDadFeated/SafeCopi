@@ -18,7 +18,7 @@ If your transfer keeps failing because Wi-Fi drops, VPN disconnects, or a remote
 
 ## What It Does
 
-- Copies one or many source folders to a destination.
+- Copies one or many sources (local folders and/or remote paths) to a destination.
 - Works with local drives and remote destinations (`user@host:/path`).
 - Automatically retries after errors or disconnects.
 - Lets you pause and resume a running transfer.
@@ -39,7 +39,7 @@ If your transfer keeps failing because Wi-Fi drops, VPN disconnects, or a remote
 
 ## Quick Start
 
-1. Add your source folder(s).
+1. Use **Add source…** for each entry: pick **Local folder** or **Remote (SSH / SFTP)** (`user@host:/path` / `sftp://…`); optional password per remote row is session-only (not saved).
 2. Set destination (local path or `user@host:/path`).
 3. For remote targets, run **Test SSH**.
 4. Run **Dest. space** to confirm capacity.
@@ -92,12 +92,14 @@ or:
 - You can run a dry run first to preview behavior before writing files.
 - The app writes troubleshooting events to `debug.log`.
 - Local source folders are copied as folders into the destination (for example, selecting `Sofie Backup/` creates `Destination/Sofie Backup/`).
+- Change a listed source with **Edit…** or by double-clicking the row (same dialog as **Add source…**, with fields prefilled).
 
 ## Releases
 
-- Current release: `1.8.3`
+- Current release: `2.0.1`
 - Version source: [`safecopi/__init__.py`](safecopi/__init__.py)
 - Full history: [`CHANGELOG.md`](CHANGELOG.md)
+- Version bumps for this repo are applied only when the maintainer requests a release (e.g. by saying **push update**); routine work does not change the tagged version by default.
 
 ---
 

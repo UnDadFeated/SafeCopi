@@ -24,6 +24,9 @@ _ASKPASS_WRAPPER: Optional[Path] = None
 # Upper bounds for user-supplied rsync knobs (match UI where applicable; clamp API callers too).
 RSYNC_TIMEOUT_SEC_MAX: int = 86400
 RSYNC_RETRY_WAIT_SEC_MAX: int = 3600
+# Receiver-only: relative to the destination root. Keeps rsync temp files out of deep trees so
+# mkstemp is less likely to hit ENOENT on laggy or strict NAS/CIFS paths.
+RSYNC_RECEIVER_TEMP_SUBDIR: str = ".safecopi-rsync-tmp"
 EXTRA_RSYNC_ARG_LINE_MAX_CHARS: int = 32_768
 EXTRA_RSYNC_ARG_COUNT_MAX: int = 512
 
@@ -108,6 +111,26 @@ def canonical_rsync_path(path: str) -> str:
     if remote is None:
         return s
     return remote.to_rsync_uri()
+
+
+def remote_rsync_uri_strip_trailing_slashes(uri: str) -> str:
+    """
+    For ``user@host:/path`` (or URL forms normalized via :func:`canonical_rsync_path`),
+    remove trailing slashes from the remote path component.
+
+    With multiple sources, this matches “copy each directory as a named folder under the
+    destination” (no trailing slash on the source). A trailing slash would mean “copy
+    only the contents” into the same destination tree, merging everything together.
+    """
+    s = uri.strip()
+    remote, rpath = parse_rsync_destination(s)
+    if remote is None:
+        return s.rstrip("/") or s
+    t = rpath.rstrip("/")
+    if not t:
+        t = "/"
+    fixed = RemoteTarget(host=remote.host, path=t, user=remote.user)
+    return fixed.to_rsync_uri()
 
 
 def bytes_from_du_path(path: str) -> Optional[int]:
@@ -778,6 +801,32 @@ def fetch_latest_github_version(
     return tag.strip(), ""
 
 
+def ensure_local_rsync_receiver_temp_dir(dest: str) -> None:
+    """
+    Create :data:`RSYNC_RECEIVER_TEMP_SUBDIR` under a **local** destination if needed.
+
+    Rsync also creates this directory on the receiver for remote destinations; calling this
+    ahead of time avoids a race on some mounts where the first deep ``mkstemp`` runs before
+    intermediate directories are visible.
+    """
+    s = dest.strip()
+    if not s:
+        return
+    remote, _ = parse_rsync_destination(s)
+    if remote is not None:
+        return
+    base = Path(s.rstrip("/")).expanduser()
+    try:
+        base = base.resolve(strict=False)
+    except OSError:
+        return
+    tmp = base / RSYNC_RECEIVER_TEMP_SUBDIR
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
 def build_rsync_command_argv(
     source: str,
     dest: str,
@@ -795,6 +844,12 @@ def build_rsync_command_argv(
     traversed.
 
     ``extra_args`` are inserted before ``-v`` and the source/destination paths.
+
+    For a **local** destination, uses a relative ``--temp-dir`` under the destination root
+    (:data:`RSYNC_RECEIVER_TEMP_SUBDIR`) plus a ``protect`` filter so ``--delete`` does not remove
+    that folder; shallow temps avoid ``mkstemp`` failures (ENOENT) in deep paths on some NAS/CIFS
+    mounts. For a **remote** destination, uses ``--temp-dir=/tmp`` on the receiver (must exist;
+    rsync 3.4+ errors if the temp directory is missing).
 
     Per-file path lines are emitted on stderr (with ``-v``) so the UI can show the
     active filename next to ``Attempt``; add ``--info=name0`` via **Extra rsync
@@ -814,8 +869,18 @@ def build_rsync_command_argv(
         *mode,
         "--info=progress2",
         "--mkpath",
-        f"--timeout={t}",
     ]
+    # Shallow temp dir: avoids receiver mkstemp in deep paths (ENOENT on some NAS/CIFS).
+    # Local: under dest (same FS as backup); remote receiver: /tmp always exists (rsync 3.4+).
+    ds = dest.strip()
+    if ds:
+        rem, _ = parse_rsync_destination(ds)
+        if rem is not None:
+            out.append("--temp-dir=/tmp")
+        else:
+            out.append(f"--temp-dir={RSYNC_RECEIVER_TEMP_SUBDIR}")
+            out.append(f"--filter=protect {RSYNC_RECEIVER_TEMP_SUBDIR}/")
+    out.append(f"--timeout={t}")
     out.extend(extra_args)
     out.extend(["-v", source, dest])
     return out
@@ -908,6 +973,33 @@ def estimate_rsync_total_bytes_from_progress(
         return transferred_bytes
     # Round to nearest byte; avoid float drift on huge values.
     return (transferred_bytes * 100 + p // 2) // p
+
+
+def clamp_monotonic_data_left_bytes(
+    left_b: Optional[int],
+    transferred_bytes: Optional[int],
+    prev_tb: Optional[int],
+    prev_left: Optional[int],
+) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    """
+    While cumulative transferred bytes only move forward, cap "data left" so it does not jump
+    upward from rsync refining totals or ETA noise (remaining should drop by about the bytes
+    sent since the last tick).
+
+    Returns ``(adjusted_left, new_prev_tb, new_prev_left)``. Clears state when ``left_b`` is
+    ``None``. Ignores the ceiling when ``transferred_bytes`` drops (new attempt / counter reset).
+    """
+    if left_b is None:
+        return None, None, None
+    tb = transferred_bytes
+    if tb is None or tb < 0:
+        return left_b, None, None
+    out = left_b
+    if prev_tb is not None and prev_left is not None and tb >= prev_tb:
+        ceiling = prev_left - (tb - prev_tb)
+        if ceiling >= 0:
+            out = min(out, ceiling)
+    return out, tb, out
 
 
 def humanize_rsync_progress_stats(paren_inner: str) -> str:

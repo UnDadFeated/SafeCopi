@@ -1,5 +1,154 @@
 # Changelog
 
+## [2.0.1] - 2026-04-09
+
+### Fixed
+
+- **Rsync / NAS**: Receiver temporary files use `--temp-dir` under the destination root (`.safecopi-rsync-tmp` for local destinations, with the directory created before each attempt and a `protect` filter so `--delete` is unlikely to remove it) or `--temp-dir=/tmp` on the receiver for remote destinations. Avoids deep-path `[receiver] mkstemp … failed: No such file or directory` on some NAS/CIFS mounts; matches rsync 3.4+ requiring the temp directory to exist before use.
+- **Multi-source sync**: Progress is **per source** (bar resets 0–100% when switching sources) instead of a monotonic session bar stuck at 100% after the first segment. **Session elapsed** appends the current list path (middle-elided when long). `debug.log` records `sync_progress_source_segment` when the active source index changes.
+
+### Changed
+
+- **Paths**: **Test SSH** sits on a full-width row at the **bottom** of the Paths group, left-aligned, reflecting that it checks every remote source and the destination—not only controls beside **Browse…**.
+
+## [2.0.0] - 2026-04-10
+
+### Added
+
+- **Edit…** (and double-click a row) opens the same source dialog with the path and optional remote password prefilled so entries can be changed without remove-and-re-add. Saving rejects a path that duplicates another row.
+
+### Fixed
+
+- **Paths layout**: Destination uses the same structure as Source(s)—stretch column for the path line (destination + destination password) and a fixed side column for **Browse…** and **Test SSH** stacked like **Add source…** / **Edit…** / **Remove**. The destination block uses the same height as the source block so the button columns align; all five side buttons share one computed width and height so **Browse…** / **Test SSH** match the source controls.
+
+## [1.9.14] - 2026-04-10
+
+### Changed
+
+- **Test SSH** runs **sequentially** against every remote **destination** (if remote) and each **remote source row**, using that row’s password for sshpass when set. The activity log lines `SSH: testing …`, `SSH: OK — …`, and `SSH: FAILED — …` name the target so `debug.log` and the UI show which path failed (e.g. wrong password). On full success, one dialog lists all `OK` lines; on failure, the warning names the failing target first.
+
+## [1.9.13] - 2026-04-10
+
+### Fixed
+
+- **Paths / Source(s)**: **Add source…** and **Remove** are placed in a column to the **right** of the list (not below it) so they cannot be clipped. Source list height is capped lower (~4 lines) to tighten the block.
+- **Paths / Destination**: Form labels use **vertical center** alignment; **PathLineEdit** (destination) uses a slimmer stylesheet (`min-height` / padding) and matches **Dest. password** row height.
+
+## [1.9.12] - 2026-04-10
+
+### Fixed
+
+- **Paths / Source(s)**: **Add source…** and **Remove** were clipped inside the fixed-height source column because the list used vertical layout stretch and consumed the full height. The list no longer takes stretch; the source column height was increased slightly so the button row always fits.
+
+## [1.9.11] - 2026-04-10
+
+### Fixed
+
+- **Paths layout**: Increased vertical spacing between Source(s) and Destination; **Test SSH** is nested under the destination field instead of a separate form row so controls no longer overlap the destination line. **Source list** uses a maximum vertical size policy to reduce paint overflow from the row below.
+- **Multi-source remote rsync**: When more than one source is configured, remote URIs now drop trailing slashes on the remote path so each directory is created under the destination by name (e.g. `…/Macie Backup/` → `Archive/Macie Backup/`) instead of merging contents into the destination root. Single-source behavior is unchanged (trailing slash still means “contents only”).
+
+### Added
+
+- **utils**: `remote_rsync_uri_strip_trailing_slashes()` for the above normalization.
+
+## [1.9.10] - 2026-04-09
+
+### Removed
+
+- **RsyncWorker**: Unused `set_process_environment` and stored `_env` fallback; rsync uses `set_environment_for_source_index` from the main window, or the system environment when no factory is set.
+
+### Changed
+
+- **MainWindow**: Dropped the `_collect_rsync_modifiers()` alias; callers use `_collect_rsync_modifiers_for_source(0)` where a single list is needed. Sync setup always supplies `extra_args_per_source` and passes an empty legacy `extra_args` list.
+
+## [1.9.9] - 2026-04-09
+
+### Added
+
+- **Unified sources list**: **Add source…** opens a dialog to append either a **local folder** or a **remote** path with an optional per-entry password (not persisted). Multiple local and remote sources may be mixed; each rsync segment uses the matching SSH password and `-e` / environment. The **Local** / **Remote** mode toggle, single-line source field, and global **Src. password** row are removed.
+
+### Changed
+
+- **Settings**: Only the **sources** path list is stored; **`source_mode_remote`** is no longer written (legacy values are ignored on load).
+
+## [1.9.8] - 2026-04-09
+
+### Changed
+
+- **Paths**: The list/single-line toggle is **Local** and **Remote** (renamed from Multi). **Local** mode shows the label **Source(s)**; **Remote** mode shows **Source**.
+
+## [1.9.7] - 2026-04-09
+
+### Fixed
+
+- **Paths alignment**: **Remote** / **Multi** is vertically centered with the source stack (label column fixed to the same height as the source field column, with spacing derived from font metrics). **Src. password** is vertically centered with the source column via `AlignVCenter`.
+
+### Changed
+
+- **Remote → Multi**: Clears the remote source line and **Src. password**; the folder list is left as it was before **Remote** (no longer copies the SSH path into the list).
+
+## [1.9.6] - 2026-04-09
+
+### Fixed
+
+- **Paths / Remote vs Multi**: Removed the separate **Source→Destination** form row. The source **stack** and **Remote-only gap** now live in a single column with **fixed total height (136px)**: Multi uses the full height for the list stack and **0px** internal gap; Remote uses **108px** for the line stack plus **28px** reserved gap below inside the same column. **Destination** and all sections below no longer shift when toggling **Remote** / **Multi**.
+
+## [1.9.5] - 2026-04-09
+
+### Changed
+
+- **Paths**: Source→Destination spacer is **off in Multi** (list) mode (**0px**). **Remote** mode keeps a **28px** spacer between the single-line source row and destination. Restored Multi source **list** max height (**104px**) and **stack** height (**136px**).
+
+## [1.9.4] - 2026-04-09
+
+### Fixed
+
+- **Paths vs main window**: Reverted window height to **900px**. The Source(s)–Destination spacer and separation stay **inside Paths** only: Multi-mode source **list** max height and stacked area are reduced by the same amount (**104px** stack, **72px** list cap) so Rsync / Command preview / File transfer positions match the pre-spacer layout.
+
+## [1.9.3] - 2026-04-09
+
+### Fixed
+
+- **Paths**: Inserted a dedicated spacer row between **Source(s)** and **Destination** so the source field and destination field no longer crowd each other. **Multi** (list) mode uses a **32px** gap; **Remote** (single-line) mode uses a **10px** gap so the Paths block does not over-expand when toggling. Window height increased by **32px** so the extra space is not taken from controls below.
+
+## [1.9.2] - 2026-04-09
+
+### Fixed
+
+- **Paths layout**: Remote source line is top-padded so its vertical center lines up with the **Multi** / **Remote** button; removed in-stack vertical stretches that pulled the field downward. **Src.** / **Dest.** password rows use vertical center alignment with their line edits; source stack and password column use `AlignVCenter` in the field row. Paths form labels use top alignment so multi-line source label column matches the field column cleanly.
+
+### Changed
+
+- **Tests**: Qt tests that edit the source list call a helper so persisted **Remote** mode does not override list-based setup.
+
+## [1.9.1] - 2026-04-09
+
+### Changed
+
+- **Paths**: **Remote** / **Multi** sits in the form label column directly under **Source(s)** (not above the source field).
+
+## [1.9.0] - 2026-04-09
+
+### Added
+
+- **Paths / Source(s)**: Label **Source(s)**; **Remote** toggles a single source field matching **Destination** (line edit, **Browse…**, shared **Src. password** when the path is remote). **Multi** restores the original multi-folder list. **Source stack height** is fixed so the Paths block does not shift the rest of the layout when switching modes. Setting **`source_mode_remote`** is persisted in `QSettings`.
+
+## [1.8.6] - 2026-04-09
+
+### Fixed
+
+- **Transfer stats**: Elapsed-first rsync `--info=progress2` lines omit a byte column; the UI reuses the last cumulative byte value from size-first progress lines so **Size (est.)**, queue extrapolation, and percent-based totals stay available when rsync mixes or omits byte tokens. The carried value clears on **retry** (attempt > 1) and on **multi-source** segment changes.
+
+### Changed
+
+- **Transfer stats**: **Size (est.)** falls back to queue- and ETA-derived job totals when overall percent is 0% or unusable; **Data left** uses a monotonic cap against forward byte progress so remaining work does not jump upward from estimate refinement alone. The size denominator matches displayed **Data left** when both are known.
+
+## [1.8.4] - 2026-04-09
+
+### Changed
+
+- **File transfer**: **Session elapsed** (including the “processing…” state) is shown above the progress bar; **TRANSFER STATS** and **ATTEMPT** / **CURRENT PATH** remain below the bar.
+
 ## [1.8.3] - 2026-04-09
 
 ### Changed

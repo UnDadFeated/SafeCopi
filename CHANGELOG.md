@@ -1,5 +1,49 @@
 # Changelog
 
+## [2.1.3] - 2026-04-10
+
+### Changed
+
+- **Paths**: Taller source/destination row so three side buttons are not vertically compressed; **7px** gaps between stacked buttons; **10px** spacing between Source and Destination rows; slightly tighter **Paths** group padding and main vertical stack spacing to reduce dead space under the destination row.
+- **Rsync**: Tighter grid margins/spacing; **If file exists** sits in a single row with the combo capped (**~240–400px** wide) and trailing stretch so it no longer spans the full panel width.
+
+## [2.1.2] - 2026-04-09
+
+### Fixed
+
+- **Tests**: `test_recursive_subdirs_toggle_affects_rsync_argv` drives the recursive checkbox explicitly so host `QSettings` cannot fail the suite; avoids unsafe monkeypatching of `QSettings.value` (PySide6).
+
+## [2.1.1] - 2026-04-09
+
+### Added
+
+- **Paths / Destination**: **Test SSH** below **Browse…** (visible when the destination is remote) runs the same `echo ok` check as **Add/Edit source**, using the destination path and **Dest. password**.
+
+## [2.1.0] - 2026-04-09
+
+### Added
+
+- **Add/Edit source** dialog: **Test SSH connection…** beside the remote password field runs `echo ok` on that host (same transport as sync: keys, `sshpass`, or `SSH_ASKPASS`) before you confirm the row. **Edit** updates that row’s list icon from the test result.
+
+### Removed
+
+- Main-window **Test SSH connections…** control and the sequential **QProcess** batch that tested the destination and every remote source.
+
+### Changed
+
+- **Paths**: Tighter vertical layout (smaller source list height, less form spacing). Onboarding guide after destination points to **Start sync** (no separate SSH step).
+- **Source list SSH hints**: Icons still reflect password state and the last per-row test from the dialog; wording/tooltips no longer refer to a main-window batch **Test SSH**.
+
+## [2.0.2] - 2026-04-09
+
+### Added
+
+- **Source list SSH hints**: Each **remote** source row shows a leading icon—hollow circle (no password), grey dot (password set, before **Test SSH**), green check (**Test SSH** succeeded), red **X** (failed or timed out). **Local** rows use a blank slot for alignment. Hints reset to the path/password baseline when you change a row or start a new **Test SSH** batch.
+
+### Changed
+
+- **Settings**: Documented that persistence includes the full **Paths** / **Rsync** UI (sources list, destination, timeouts, options, extra args, etc.) and **never** stores SSH passwords (source per-row or destination field); re-open the app and re-enter passwords as needed.
+
 ## [2.0.1] - 2026-04-09
 
 ### Fixed

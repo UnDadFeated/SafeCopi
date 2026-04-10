@@ -102,7 +102,7 @@ def test_get_guide_target_browse_dest_when_dest_empty(
     assert w._get_guide_target() is w._btn_browse_dest
 
 
-def test_get_guide_target_remote_source_goes_to_ssh(
+def test_get_guide_target_remote_source_goes_to_start_when_dest_set(
     qtbot, offscreen_env,
 ) -> None:
     w = MainWindow()
@@ -110,8 +110,7 @@ def test_get_guide_target_remote_source_goes_to_ssh(
     w._source_list.clear()
     w._source_list.addItem("user@example.com:/data/")
     w._dest.setText("/mnt/backup/")
-    w._ssh_ok_this_session = False
-    assert w._get_guide_target() is w._btn_ssh
+    assert w._get_guide_target() is w._btn_start
 
 
 def test_get_guide_target_start_after_dest_when_local_ready(
@@ -124,11 +123,10 @@ def test_get_guide_target_start_after_dest_when_local_ready(
     w._source_list.clear()
     w._source_list.addItem(str(src) + "/")
     w._dest.setText("/tmp/dest/")
-    w._ssh_ok_this_session = True
     assert w._get_guide_target() is w._btn_start
 
 
-def test_get_guide_target_mixed_local_remote_points_ssh_when_dest_remote(
+def test_get_guide_target_mixed_local_remote_points_start_when_dest_remote(
     tmp_path, qtbot, offscreen_env
 ) -> None:
     local = tmp_path / "a"
@@ -139,14 +137,14 @@ def test_get_guide_target_mixed_local_remote_points_ssh_when_dest_remote(
     d._source_list.addItem(str(local) + "/")
     d._source_list.addItem("user@example.com:/remote/")
     d._dest.setText("user@example.com:/dest/")
-    d._ssh_ok_this_session = False
-    assert d._get_guide_target() is d._btn_ssh
+    assert d._get_guide_target() is d._btn_start
 
 
-def test_recursive_subdirs_default_on(qtbot, offscreen_env) -> None:
+def test_recursive_subdirs_toggle_affects_rsync_argv(qtbot, offscreen_env) -> None:
+    """Recursive on → archive (-ah); off → explicit perms (-hlptgoD). Host QSettings may override the initial checkbox."""
     w = MainWindow()
     qtbot.addWidget(w)
-    assert w._recursive_subdirs.isChecked()
+    w._recursive_subdirs.setChecked(True)
     argv = build_rsync_command_argv(
         "/a",
         "b:/c",

@@ -5,8 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-from collections import deque
-from dataclasses import dataclass
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -17,12 +16,23 @@ from PySide6.QtCore import (
     QProcess,
     QProcessEnvironment,
     QSettings,
+    QSize,
     QThread,
     Qt,
     QTimer,
     Slot,
 )
-from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics
+from PySide6.QtGui import (
+    QBrush,
+    QCloseEvent,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -58,7 +68,6 @@ from safecopi.utils import (
     EXISTING_FILES_MODE_CHOICES,
     EXISTING_FILES_MODE_DEFAULT,
     SSH_DF_SUBPROCESS_OVERHEAD_SEC,
-    SSH_SUBPROCESS_MAX_RUNTIME_OVERHEAD_SEC,
     SSH_TEST_CONNECT_TIMEOUT_SEC,
     build_remote_df_shell_command,
     build_rsync_command_argv,
@@ -81,6 +90,7 @@ from safecopi.utils import (
     parse_remote_df_stdout,
     parse_rsync_destination,
     rsync_ssh_e_shell,
+    run_ssh_command,
     ssh_command_environment,
 )
 from safecopi.workers import DestSpaceWorker, GitHubUpdateCheckWorker, RsyncWorker
@@ -90,22 +100,108 @@ _LOG_LINE_MAX_CHARS: int = 12_000
 # Cap source folders to avoid accidental huge lists and argv explosion.
 _MAX_SOURCE_FOLDERS: int = 64
 # Source field: list (left) + Add/Remove column (right); fixed height matches the list cap.
-# ~4 visible lines; buttons live beside the list so they are never clipped vertically.
-_PATHS_SOURCE_FIELD_TOTAL_H: int = 88
+# ~3–4 visible lines; side column must fit three stacked buttons without vertical squeeze.
+_PATHS_SOURCE_FIELD_TOTAL_H: int = 92
 # Paths box: source + destination side columns share one button size (Browse matches Add/Edit/Remove).
 _PATHS_SIDE_BTN_MIN_H: int = 26
 # Per-item remote SSH password (runtime only; not persisted in QSettings).
 _SOURCE_ITEM_PW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+# QListWidgetItem: last SSH hint state for icon (runtime only).
+_SOURCE_ITEM_SSH_HINT_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+
+_SSH_HINT_ICON_PX: int = 18
+# ItemDataRole values for _SOURCE_ITEM_SSH_HINT_ROLE (debug / consistency).
+_SSH_HINT_LOCAL: int = 0
+_SSH_HINT_NONE_PW: int = 1
+_SSH_HINT_PENDING: int = 2
+_SSH_HINT_OK: int = 3
+_SSH_HINT_FAIL: int = 4
+
+_ssh_hint_icon_cache: Dict[str, QIcon] = {}
 
 
-@dataclass(frozen=True)
-class _SshTestJob:
-    """One SSH probe (destination or a listed source row) for Test SSH."""
+def _ssh_hint_icon_blank() -> QIcon:
+    k = "blank"
+    if k not in _ssh_hint_icon_cache:
+        pm = QPixmap(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX)
+        pm.fill(Qt.GlobalColor.transparent)
+        _ssh_hint_icon_cache[k] = QIcon(pm)
+    return _ssh_hint_icon_cache[k]
 
-    remote: RemoteTarget
-    display: str
-    extra_env: Optional[Dict[str, str]]
-    pw_sshpass: Optional[str]
+
+def _ssh_hint_icon_no_password() -> QIcon:
+    """Remote row with no password set (keys / SSH_ASKPASS only)."""
+    k = "no_pw"
+    if k not in _ssh_hint_icon_cache:
+        pm = QPixmap(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#cdd6f4"))
+        pen.setWidthF(1.75)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        m, d = 3, _SSH_HINT_ICON_PX
+        p.drawEllipse(m, m, d - 2 * m, d - 2 * m)
+        p.end()
+        _ssh_hint_icon_cache[k] = QIcon(pm)
+    return _ssh_hint_icon_cache[k]
+
+
+def _ssh_hint_icon_pending() -> QIcon:
+    """Remote row with password set, before / between Test SSH runs."""
+    k = "pending"
+    if k not in _ssh_hint_icon_cache:
+        pm = QPixmap(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor("#6c7086")))
+        d = _SSH_HINT_ICON_PX
+        p.drawEllipse(d // 2 - 3, d // 2 - 3, 7, 7)
+        p.end()
+        _ssh_hint_icon_cache[k] = QIcon(pm)
+    return _ssh_hint_icon_cache[k]
+
+
+def _ssh_hint_icon_ok() -> QIcon:
+    k = "ok"
+    if k not in _ssh_hint_icon_cache:
+        pm = QPixmap(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#a6e3a1"))
+        pen.setWidthF(2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        d = _SSH_HINT_ICON_PX
+        p.drawLine(4, d // 2 + 1, 8, d - 5)
+        p.drawLine(8, d - 5, d - 4, 5)
+        p.end()
+        _ssh_hint_icon_cache[k] = QIcon(pm)
+    return _ssh_hint_icon_cache[k]
+
+
+def _ssh_hint_icon_fail() -> QIcon:
+    k = "fail"
+    if k not in _ssh_hint_icon_cache:
+        pm = QPixmap(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#f38ba8"))
+        pen.setWidthF(2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        d = _SSH_HINT_ICON_PX
+        m = 5
+        p.drawLine(m, m, d - m, d - m)
+        p.drawLine(d - m, m, m, d - m)
+        p.end()
+        _ssh_hint_icon_cache[k] = QIcon(pm)
+    return _ssh_hint_icon_cache[k]
 
 
 # File transfer panel: match Session elapsed (monospace) for all stats and path text.
@@ -141,7 +237,6 @@ class MainWindow(QWidget):
         self._settings_loading = False
         self._last_sync_was_dry_run = False
         self._dest_free_bytes: Optional[int] = None
-        self._ssh_ok_this_session: bool = False
         self._sync_waiting_for_dest_space: bool = False
         self._space_thread: Optional[QThread] = None
         self._space_process: Optional[QProcess] = None
@@ -150,14 +245,6 @@ class MainWindow(QWidget):
         self._space_timeout_timer = QTimer(self)
         self._space_timeout_timer.setSingleShot(True)
         self._space_timeout_timer.timeout.connect(self._on_space_process_timeout)
-        self._ssh_test_process: Optional[QProcess] = None
-        self._ssh_test_timed_out: bool = False
-        self._ssh_test_timeout_timer = QTimer(self)
-        self._ssh_test_timeout_timer.setSingleShot(True)
-        self._ssh_test_timeout_timer.timeout.connect(self._on_ssh_test_timeout)
-        self._ssh_test_queue: deque[_SshTestJob] = deque()
-        self._ssh_test_current: Optional[_SshTestJob] = None
-        self._ssh_test_ok_displays: List[str] = []
         self._update_check_thread: Optional[QThread] = None
         self._guide_pulse_timer = QTimer(self)
         self._guide_pulse_timer.setInterval(550)
@@ -190,12 +277,16 @@ class MainWindow(QWidget):
 
         self._source_list = QListWidget()
         self._source_list.setObjectName("SourceList")
-        self._source_list.setMinimumHeight(44)
-        self._source_list.setMaximumHeight(72)
+        self._source_list.setMinimumHeight(40)
+        self._source_list.setMaximumHeight(62)
+        self._source_list.setIconSize(QSize(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX))
         self._source_list.setToolTip(
             "One or more sources: local folders and/or remote user@host:/path (or sftp://…). "
             "Use Add source… for each entry, or Edit… on a selected row; optional password per "
-            "remote row is not saved.\n\n"
+            "remote row is not saved (paths are saved in settings).\n\n"
+            "Icon (remote rows): hollow circle — no password; grey dot — password set, not tested yet; "
+            "green check — last dialog SSH test succeeded; red X — last test failed. Local folders "
+            "have no icon.\n\n"
             "With several sources, each is copied into the destination under its own top-level "
             "name (e.g. …/Macie Backup/ → dest/Macie Backup/). Remote trailing slashes are "
             "normalized for multi-source so folders are not merged into the destination root.\n\n"
@@ -223,7 +314,9 @@ class MainWindow(QWidget):
         self._dest.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._dest.setMinimumHeight(22)
         self._dest.setClearButtonEnabled(True)
-        self._dest.setPlaceholderText('user@host:/path, sftp://user@host/path, or local /path')
+        self._dest.setPlaceholderText(
+            "e.g. /mnt/backups/Archive/ or user@host:/mnt/backup/ (paste sftp://… from Dolphin)"
+        )
         self._timeout = QSpinBox()
         self._timeout.setRange(10, 86400)
         self._timeout.setValue(60)
@@ -272,13 +365,13 @@ class MainWindow(QWidget):
         )
         self._btn_browse_dest.clicked.connect(self._browse_destination)
 
-        self._btn_ssh = QPushButton("Test SSH")
-        self._btn_ssh.setToolTip(
-            "Test SSH to the remote destination (if any) and each remote source row, in order — "
-            "same transport as rsync (keys, sshpass, or SSH_ASKPASS). The log shows OK or FAILED "
-            "per line so you can see which path had a bad password."
+        self._btn_test_ssh_dest = QPushButton("Test SSH")
+        self._btn_test_ssh_dest.setToolTip(
+            "Verify SSH to the destination host when it is user@host:/path (same as sync: "
+            "keys, sshpass, or SSH_ASKPASS). Uses the destination field and Dest. password."
         )
-        self._btn_ssh.clicked.connect(self._test_ssh)
+        self._btn_test_ssh_dest.clicked.connect(self._test_ssh_destination)
+        self._btn_test_ssh_dest.setVisible(False)
 
         self._lbl_ssh_pw = QLabel("Dest. password")
         self._lbl_ssh_pw.setStyleSheet("color: #bac2de;")
@@ -433,9 +526,11 @@ class MainWindow(QWidget):
         self._log.setFont(log_font)
 
         paths = QGroupBox("Paths")
+        paths.setObjectName("PathsBox")
         fl = QFormLayout(paths)
         self._compact_form(fl)
         fl.setVerticalSpacing(10)
+        fl.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         fl.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -449,7 +544,7 @@ class MainWindow(QWidget):
         self._source_list.setFixedHeight(self._source_list.maximumHeight())
         _src_row.addWidget(self._source_list, 1)
         _src_btns_col = QVBoxLayout()
-        _src_btns_col.setSpacing(6)
+        _src_btns_col.setSpacing(7)
         _src_btns_col.setContentsMargins(0, 0, 0, 0)
         _src_btns_col.addWidget(self._btn_add_source, 0, Qt.AlignmentFlag.AlignTop)
         _src_btns_col.addWidget(self._btn_edit_source, 0, Qt.AlignmentFlag.AlignTop)
@@ -484,9 +579,10 @@ class MainWindow(QWidget):
         w_dest_left = QWidget()
         w_dest_left.setLayout(row_dest_line)
         _dest_btns_col = QVBoxLayout()
-        _dest_btns_col.setSpacing(6)
+        _dest_btns_col.setSpacing(7)
         _dest_btns_col.setContentsMargins(0, 0, 0, 0)
         _dest_btns_col.addWidget(self._btn_browse_dest, 0, Qt.AlignmentFlag.AlignTop)
+        _dest_btns_col.addWidget(self._btn_test_ssh_dest, 0, Qt.AlignmentFlag.AlignTop)
         _dest_btns_col.addStretch(1)
         _dest_btns_wrap = QWidget()
         _dest_btns_wrap.setLayout(_dest_btns_col)
@@ -500,15 +596,18 @@ class MainWindow(QWidget):
         w_dest = QWidget()
         w_dest.setLayout(row_dest_outer)
         w_dest.setFixedHeight(_PATHS_SOURCE_FIELD_TOTAL_H)
-        fl.addRow("Destination", w_dest)
 
-        self._paths_ssh_row_wrap = QWidget()
-        _psh = QHBoxLayout(self._paths_ssh_row_wrap)
-        _psh.setContentsMargins(0, 6, 0, 0)
-        _psh.setSpacing(0)
-        _psh.addWidget(self._btn_ssh, 0, Qt.AlignmentFlag.AlignLeft)
-        _psh.addStretch(1)
-        fl.addRow(self._paths_ssh_row_wrap)
+        self._lbl_dest_title = QLabel("Destination")
+        self._lbl_dest_title.setAlignment(Qt.AlignmentFlag.AlignRight)
+        _dest_label_col = QWidget()
+        _dest_label_col.setFixedHeight(_PATHS_SOURCE_FIELD_TOTAL_H)
+        _dlc = QVBoxLayout(_dest_label_col)
+        _dlc.setContentsMargins(0, 0, 0, 0)
+        _dlc.setSpacing(0)
+        _dlc.addStretch(1)
+        _dlc.addWidget(self._lbl_dest_title, 0, Qt.AlignmentFlag.AlignRight)
+        _dlc.addStretch(1)
+        fl.addRow(_dest_label_col, w_dest)
 
         self._apply_paths_side_button_metrics()
 
@@ -522,8 +621,10 @@ class MainWindow(QWidget):
             "Skip (filename+size): --size-only. Skip (name only): --ignore-existing. "
             "Inserted before Extra args — avoid duplicating those flags there."
         )
+        self._combo_existing_files.setMinimumWidth(240)
+        self._combo_existing_files.setMaximumWidth(400)
         self._combo_existing_files.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
 
         self._bwlimit = QSpinBox()
@@ -545,10 +646,9 @@ class MainWindow(QWidget):
 
         opts = QGroupBox("Rsync")
         og = QGridLayout(opts)
-        og.setContentsMargins(8, 10, 8, 8)
-        og.setHorizontalSpacing(10)
-        og.setVerticalSpacing(6)
-        og.setColumnStretch(1, 1)
+        og.setContentsMargins(8, 8, 8, 8)
+        og.setHorizontalSpacing(12)
+        og.setVerticalSpacing(5)
 
         self._timeout.setMaximumWidth(110)
         self._retry.setMaximumWidth(110)
@@ -583,15 +683,16 @@ class MainWindow(QWidget):
         pr.addStretch(1)
         og.addWidget(partial_row, 2, 0, 1, 2)
 
+        existing_files_row = QWidget()
+        _ef = QHBoxLayout(existing_files_row)
+        _ef.setContentsMargins(0, 0, 0, 0)
+        _ef.setSpacing(10)
         lbl_if = QLabel("If file exists")
         lbl_if.setStyleSheet("color: #bac2de;")
-        og.addWidget(
-            lbl_if,
-            3,
-            0,
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-        )
-        og.addWidget(self._combo_existing_files, 3, 1)
+        _ef.addWidget(lbl_if, 0, Qt.AlignmentFlag.AlignVCenter)
+        _ef.addWidget(self._combo_existing_files, 0, Qt.AlignmentFlag.AlignVCenter)
+        _ef.addStretch(1)
+        og.addWidget(existing_files_row, 3, 0, 1, 2)
 
         bw_extra_row = QWidget()
         ber = QHBoxLayout(bw_extra_row)
@@ -643,7 +744,7 @@ class MainWindow(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 6, 8, 6)
-        root.setSpacing(4)
+        root.setSpacing(3)
         root.addWidget(paths)
         root.addWidget(opts)
         root.addWidget(cmd_box, stretch=1)
@@ -713,6 +814,9 @@ class MainWindow(QWidget):
                 border-radius: 6px;
                 margin-top: 6px;
                 padding: 5px 6px 5px 6px;
+            }
+            QGroupBox#PathsBox {
+                padding: 4px 6px 3px 6px;
             }
             QGroupBox::title { subcontrol-origin: margin; left: 7px; padding: 0 3px; }
             QLineEdit, QPlainTextEdit {
@@ -834,11 +938,11 @@ class MainWindow(QWidget):
             )
             event.ignore()
             return
-        if self._dest_space_busy() or self._qprocess_ref_busy("_ssh_test_process"):
+        if self._dest_space_busy():
             QMessageBox.warning(
                 self,
                 "Quit",
-                "Wait for the destination space check or SSH test to finish, then close again.",
+                "Wait for the destination space check to finish, then close again.",
             )
             event.ignore()
             return
@@ -874,7 +978,6 @@ class MainWindow(QWidget):
 
     @Slot()
     def _on_paths_or_ssh_context_changed(self) -> None:
-        self._ssh_ok_this_session = False
         self._sync_guide_pulse()
 
     @Slot()
@@ -895,6 +998,7 @@ class MainWindow(QWidget):
                 t = it.text().strip()
                 if t:
                     plist.append(t)
+        # Paths, rsync options, and UI policy — never SSH passwords (source rows or destination).
         s.setValue("sources", plist[:_MAX_SOURCE_FOLDERS])
         s.setValue("dest", self._dest.text())
         s.setValue("io_timeout", self._timeout.value())
@@ -945,6 +1049,39 @@ class MainWindow(QWidget):
         it = QListWidgetItem(path)
         it.setData(_SOURCE_ITEM_PW_ROLE, password_plain or "")
         self._source_list.addItem(it)
+        self._rebase_source_ssh_hint_row(self._source_list.count() - 1)
+
+    def _rebase_source_ssh_hint_row(self, row: int) -> None:
+        """Reset list icon to path/password baseline (before a new Test SSH run or after edits)."""
+        it = self._source_list.item(row)
+        if it is None:
+            return
+        path = it.text().strip()
+        if not path:
+            it.setIcon(QIcon())
+            return
+        rmt, _ = parse_rsync_destination(path)
+        if rmt is None:
+            it.setIcon(_ssh_hint_icon_blank())
+            it.setData(_SOURCE_ITEM_SSH_HINT_ROLE, _SSH_HINT_LOCAL)
+            return
+        if self._source_password_for_row(row):
+            it.setIcon(_ssh_hint_icon_pending())
+            it.setData(_SOURCE_ITEM_SSH_HINT_ROLE, _SSH_HINT_PENDING)
+        else:
+            it.setIcon(_ssh_hint_icon_no_password())
+            it.setData(_SOURCE_ITEM_SSH_HINT_ROLE, _SSH_HINT_NONE_PW)
+
+    def _apply_source_row_ssh_test_result(self, row: int, ok: bool) -> None:
+        it = self._source_list.item(row)
+        if it is None:
+            return
+        if ok:
+            it.setIcon(_ssh_hint_icon_ok())
+            it.setData(_SOURCE_ITEM_SSH_HINT_ROLE, _SSH_HINT_OK)
+        else:
+            it.setIcon(_ssh_hint_icon_fail())
+            it.setData(_SOURCE_ITEM_SSH_HINT_ROLE, _SSH_HINT_FAIL)
 
     def _source_for_sync(self, raw_path: str, *, multi_source: bool = False) -> str:
         """
@@ -986,12 +1123,13 @@ class MainWindow(QWidget):
             return s if s.endswith("/") else s + "/"
 
     def _apply_paths_side_button_metrics(self) -> None:
-        """Equal size for source/destination side columns; Test SSH matches height only."""
+        """Equal size for source/destination side column buttons."""
         side_btns = (
             self._btn_add_source,
             self._btn_edit_source,
             self._btn_remove_source,
             self._btn_browse_dest,
+            self._btn_test_ssh_dest,
         )
         h = _PATHS_SIDE_BTN_MIN_H
         w = 0
@@ -1002,8 +1140,78 @@ class MainWindow(QWidget):
         w += 8
         for b in side_btns:
             b.setFixedSize(w, h)
-        self._btn_ssh.setFixedHeight(h)
-        self._btn_ssh.setMinimumWidth(self._btn_ssh.sizeHint().width() + 8)
+
+    def _dialog_test_remote_ssh(
+        self,
+        parent: QWidget,
+        raw_path: str,
+        password_plain: str,
+        *,
+        hint_row: Optional[int],
+        empty_path_message: str = "Enter a remote path first.",
+        not_remote_message: str = (
+            "That entry is not remote. SSH test applies to user@host:/path sources."
+        ),
+    ) -> None:
+        raw = raw_path.strip()
+        if not raw:
+            QMessageBox.warning(parent, "SSH test", empty_path_message)
+            return
+        norm = canonical_rsync_path(raw)
+        rmt, _ = parse_rsync_destination(norm)
+        if rmt is None:
+            QMessageBox.information(parent, "SSH test", not_remote_message)
+            return
+        pw_plain = password_plain.strip()
+        pw_ssh = pw_plain if pw_plain and shutil.which("sshpass") else None
+        extra_env: Optional[Dict[str, str]] = None
+        if pw_ssh is None:
+            w = ensure_ssh_askpass_wrapper()
+            extra_env = {
+                "SSH_ASKPASS": str(w),
+                "SSH_ASKPASS_REQUIRE": "force",
+            }
+        try:
+            cp = run_ssh_command(
+                rmt,
+                "echo ok",
+                connect_timeout=SSH_TEST_CONNECT_TIMEOUT_SEC,
+                batch_mode=self._ssh_batch_mode(),
+                extra_env=extra_env,
+                password_for_sshpass=pw_ssh,
+            )
+        except FileNotFoundError as e:
+            QMessageBox.critical(parent, "SSH test", str(e))
+            if hint_row is not None:
+                self._apply_source_row_ssh_test_result(hint_row, False)
+            return
+        except subprocess.TimeoutExpired:
+            QMessageBox.warning(
+                parent,
+                "SSH test",
+                "Connection timed out. Check host, network, and firewall.",
+            )
+            if hint_row is not None:
+                self._apply_source_row_ssh_test_result(hint_row, False)
+            return
+        out = (cp.stdout or "").strip().lower()
+        ok = cp.returncode == 0 and "ok" in out
+        if ok:
+            debug_log("SSH", "dialog_test_ok", host=rmt.ssh_spec())
+            QMessageBox.information(parent, "SSH test", "SSH connection succeeded.")
+            if hint_row is not None:
+                self._apply_source_row_ssh_test_result(hint_row, True)
+        else:
+            err = (cp.stderr or "").strip() or f"exit {cp.returncode}"
+            debug_log(
+                "SSH",
+                "dialog_test_fail",
+                host=rmt.ssh_spec(),
+                returncode=cp.returncode,
+            )
+            QMessageBox.warning(parent, "SSH test", f"SSH test failed:\n{err}")
+            if hint_row is not None:
+                self._apply_source_row_ssh_test_result(hint_row, False)
 
     def _run_source_path_dialog(
         self,
@@ -1011,6 +1219,7 @@ class MainWindow(QWidget):
         title: str,
         initial_path: str,
         initial_pw: str,
+        ssh_hint_row: Optional[int] = None,
     ) -> Optional[Tuple[str, str]]:
         """
         Add/Edit source dialog. Returns ``(normalized_path, password_plain)`` or ``None``
@@ -1038,19 +1247,31 @@ class MainWindow(QWidget):
         v.addLayout(row_kind)
         le_path = QLineEdit()
         le_path.setMinimumHeight(28)
-        le_path.setPlaceholderText("Path or user@host:/path")
+        le_path.setPlaceholderText("e.g. /home/you/Documents/ or user@host:/data/")
         le_pw = QLineEdit()
         le_pw.setEchoMode(QLineEdit.EchoMode.Password)
-        le_pw.setPlaceholderText("Optional password (remote only, not saved)")
+        le_pw.setPlaceholderText("SSH password if needed (not saved)")
         le_pw.setMinimumHeight(28)
         le_pw.setText(initial_pw)
+        btn_test_ssh = QPushButton("Test SSH connection…")
+        btn_test_ssh.setMinimumHeight(28)
+        btn_test_ssh.setToolTip(
+            "Run echo ok on the remote host using the path and password above "
+            "(same as sync: keys, sshpass, or SSH_ASKPASS)."
+        )
+        pw_wrap = QWidget()
+        pw_h = QHBoxLayout(pw_wrap)
+        pw_h.setContentsMargins(0, 0, 0, 0)
+        pw_h.setSpacing(8)
+        pw_h.addWidget(le_pw, 1)
+        pw_h.addWidget(btn_test_ssh, 0)
         btn_browse = QPushButton("Browse…")
         btn_browse.setMinimumHeight(28)
         path_row = QHBoxLayout()
         path_row.addWidget(le_path, 1)
         path_row.addWidget(btn_browse, 0)
         v.addLayout(path_row)
-        v.addWidget(le_pw)
+        v.addWidget(pw_wrap)
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1060,11 +1281,11 @@ class MainWindow(QWidget):
         def sync_mode() -> None:
             loc = rb_local.isChecked()
             btn_browse.setVisible(loc)
-            le_pw.setVisible(not loc)
+            pw_wrap.setVisible(not loc)
             if loc:
-                le_path.setPlaceholderText("Local directory path")
+                le_path.setPlaceholderText("e.g. /home/you/Backups/MyFolder/")
             else:
-                le_path.setPlaceholderText("user@host:/path or sftp://…")
+                le_path.setPlaceholderText("e.g. user@host:/mnt/share/ or paste sftp://…")
 
         def browse_local() -> None:
             start = le_path.text().strip()
@@ -1079,6 +1300,14 @@ class MainWindow(QWidget):
         rb_local.toggled.connect(lambda _c: sync_mode())
         rb_remote.toggled.connect(lambda _c: sync_mode())
         btn_browse.clicked.connect(browse_local)
+        btn_test_ssh.clicked.connect(
+            lambda: self._dialog_test_remote_ssh(
+                dlg,
+                le_path.text(),
+                le_pw.text(),
+                hint_row=ssh_hint_row,
+            )
+        )
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
         sync_mode()
@@ -1257,7 +1486,7 @@ class MainWindow(QWidget):
         return args
 
     def _apply_idle_control_state_after_preflight_async(self) -> None:
-        """Re-enable path/sync widgets after a background SSH or df task completes."""
+        """Re-enable path/sync widgets after a background destination space (df) task completes."""
         if self._rsync.is_syncing() or self._pending_sync_launch:
             self._set_path_and_rsync_controls_enabled(False)
         else:
@@ -1625,6 +1854,7 @@ class MainWindow(QWidget):
             title="Edit source",
             initial_path=initial,
             initial_pw=pw0,
+            ssh_hint_row=row,
         )
         if res is None:
             return
@@ -1647,6 +1877,7 @@ class MainWindow(QWidget):
             return
         it.setText(norm)
         it.setData(_SOURCE_ITEM_PW_ROLE, pw or "")
+        self._rebase_source_ssh_hint_row(row)
         self._on_sources_mutation()
 
     @Slot()
@@ -1668,10 +1899,23 @@ class MainWindow(QWidget):
             self._dest.setText(d if d.endswith("/") else d + "/")
 
     @Slot()
+    def _test_ssh_destination(self) -> None:
+        self._dialog_test_remote_ssh(
+            self,
+            self._dest.text(),
+            self._ssh_password.text(),
+            hint_row=None,
+            empty_path_message="Enter a destination path first.",
+            not_remote_message=(
+                "SSH test applies when the destination is user@host:/path."
+            ),
+        )
+
+    @Slot()
     def _update_ssh_password_visibility(self) -> None:
-        self._ssh_pw_wrap.setVisible(self._parsed_destination()[0] is not None)
-        er = self._ssh_either_remote()
-        self._paths_ssh_row_wrap.setVisible(er)
+        dr = self._parsed_destination()[0] is not None
+        self._ssh_pw_wrap.setVisible(dr)
+        self._btn_test_ssh_dest.setVisible(dr)
 
     def _parsed_destination(self) -> Tuple[Optional[RemoteTarget], str]:
         return parse_rsync_destination(self._dest.text().strip())
@@ -1750,20 +1994,6 @@ class MainWindow(QWidget):
             "SSH_ASKPASS_REQUIRE": "force",
         }
 
-    def _source_ssh_extra_env_for_row(self, row: int) -> Optional[Dict[str, str]]:
-        paths = self._source_paths_list()
-        if row < 0 or row >= len(paths):
-            return None
-        if parse_rsync_destination(paths[row])[0] is None:
-            return None
-        if self._source_sshpass_password_for_row(row):
-            return None
-        w = ensure_ssh_askpass_wrapper()
-        return {
-            "SSH_ASKPASS": str(w),
-            "SSH_ASKPASS_REQUIRE": "force",
-        }
-
     def _ssh_qprocess_env_for_source_index(self, source_index: int) -> QProcessEnvironment:
         env = QProcessEnvironment.systemEnvironment()
         paths = self._source_paths_list()
@@ -1787,289 +2017,6 @@ class MainWindow(QWidget):
             env.remove("SSH_ASKPASS_REQUIRE")
             env.remove("SSHPASS")
         return env
-
-    @staticmethod
-    def _ssh_test_clip_display(s: str, max_len: int = 118) -> str:
-        t = s.strip()
-        if len(t) <= max_len:
-            return t
-        return t[: max_len - 1] + "…"
-
-    def _ssh_test_build_jobs(self) -> List[_SshTestJob]:
-        jobs: List[_SshTestJob] = []
-        dest_raw = self._dest.text().strip()
-        dr, _ = parse_rsync_destination(dest_raw)
-        if dr is not None:
-            jobs.append(
-                _SshTestJob(
-                    remote=dr,
-                    display=f"Destination — {self._ssh_test_clip_display(dest_raw)}",
-                    extra_env=self._ssh_extra_env(),
-                    pw_sshpass=self._dest_sshpass_password(),
-                )
-            )
-        for i, p in enumerate(self._source_paths_list()):
-            r, _rp = parse_rsync_destination(p)
-            if r is not None:
-                jobs.append(
-                    _SshTestJob(
-                        remote=r,
-                        display=f"Source #{i + 1} — {self._ssh_test_clip_display(p)}",
-                        extra_env=self._source_ssh_extra_env_for_row(i),
-                        pw_sshpass=self._source_sshpass_password_for_row(i),
-                    )
-                )
-        return jobs
-
-    def _ssh_test_abort_batch_state(self) -> None:
-        self._ssh_test_queue.clear()
-        self._ssh_test_current = None
-        self._ssh_test_ok_displays.clear()
-
-    def _ssh_test_failure_hint(self, err: str) -> str:
-        el = err.lower()
-        if "please try again" in el:
-            return (
-                "\n\nThe server is asking for a password; “please try again” "
-                "usually means the password was wrong or the account cannot log in. "
-                "Check the password for this specific source or destination row."
-            )
-        if "permission denied" in el and "publickey" in el:
-            return (
-                "\n\nThis often means wrong password, missing key, or sshd only allows keys. "
-                "Try: ssh USER@HOST in a terminal for the same path shown above."
-            )
-        return ""
-
-    def _ssh_test_batch_all_succeeded(self) -> None:
-        lines = self._ssh_test_ok_displays
-        n = len(lines)
-        self._append_log(f"SSH: finished — all {n} connection test(s) succeeded.")
-        body = "All SSH tests succeeded:\n\n" + "\n".join(f"  OK — {x}" for x in lines)
-        QMessageBox.information(self, "SSH test", body)
-        self._ssh_ok_this_session = True
-        self._ssh_test_ok_displays.clear()
-
-    def _ssh_test_on_one_succeeded(self) -> None:
-        job = self._ssh_test_current
-        if job is None:
-            return
-        self._ssh_test_ok_displays.append(job.display)
-        self._append_log(f"SSH: OK — {job.display}")
-        debug_log(
-            "SSH",
-            "test_result_ok",
-            target=job.display,
-            host=job.remote.ssh_spec(),
-        )
-        self._ssh_test_current = None
-        if self._ssh_test_queue:
-            self._ssh_test_dequeue_and_start()
-        else:
-            self._ssh_test_batch_all_succeeded()
-
-    def _ssh_test_on_one_failed(self, returncode: int, stderr: str, stdout: str) -> None:
-        job = self._ssh_test_current
-        display = job.display if job is not None else "(unknown target)"
-        err = (stderr or stdout or "").strip() or f"exit {returncode}"
-        debug_log(
-            "SSH",
-            "test_fail_detail",
-            target=display,
-            returncode=returncode,
-            stderr_excerpt=(stderr or "").strip()[:800],
-            stdout_excerpt=(stdout or "").strip()[:400],
-        )
-        hint = self._ssh_test_failure_hint(err)
-        debug_log("SSH", "test_result_fail", target=display, returncode=returncode)
-        self._append_log(f"SSH: FAILED — {display} — {err}")
-        QMessageBox.warning(
-            self,
-            "SSH test",
-            f"Failed on:\n{display}\n\n{err}{hint}",
-        )
-        self._ssh_ok_this_session = False
-        self._ssh_test_abort_batch_state()
-
-    def _ssh_test_handle_process_exit(self, exit_code: int, stdout: str, stderr: str) -> None:
-        out = (stdout or "").strip()
-        if exit_code == 0 and "ok" in out:
-            self._ssh_test_on_one_succeeded()
-        else:
-            self._ssh_test_on_one_failed(exit_code, stderr, stdout)
-
-    def _ssh_test_dequeue_and_start(self) -> None:
-        if not self._ssh_test_queue:
-            return
-        job = self._ssh_test_queue.popleft()
-        self._start_ssh_test_job(job)
-
-    def _start_ssh_test_job(self, job: _SshTestJob) -> None:
-        self._ssh_test_current = job
-        debug_log(
-            "SSH",
-            "test_start",
-            target=job.display,
-            host=job.remote.ssh_spec(),
-        )
-        self._append_log(f"SSH: testing {job.display} …")
-        try:
-            argv = build_ssh_command_argv(
-                job.remote,
-                "echo ok",
-                connect_timeout=SSH_TEST_CONNECT_TIMEOUT_SEC,
-                batch_mode=self._ssh_batch_mode(),
-                password_for_sshpass=job.pw_sshpass,
-            )
-        except FileNotFoundError as e:
-            debug_log("SSH", "test_sshpass_missing", error=str(e), target=job.display)
-            QMessageBox.critical(self, "SSH test", str(e))
-            self._append_log(f"SSH: error — {job.display} — {e}")
-            self._ssh_ok_this_session = False
-            self._ssh_test_abort_batch_state()
-            self._apply_idle_control_state_after_preflight_async()
-            self._sync_guide_pulse()
-            return
-
-        qenv = _qprocess_environment_from_environ_dict(
-            ssh_command_environment(job.extra_env, job.pw_sshpass)
-        )
-
-        self._btn_ssh.setEnabled(False)
-        self._sync_guide_pulse()
-        self._ssh_test_timed_out = False
-        proc = QProcess(self)
-        self._ssh_test_process = proc
-        proc.setProcessEnvironment(qenv)
-        proc.setStandardInputFile(QProcess.nullDevice())
-        proc.finished.connect(self._on_ssh_test_process_finished)
-        timeout_ms = (
-            SSH_TEST_CONNECT_TIMEOUT_SEC + SSH_SUBPROCESS_MAX_RUNTIME_OVERHEAD_SEC
-        ) * 1000
-        self._ssh_test_timeout_timer.start(timeout_ms)
-        program, args = argv[0], argv[1:]
-        proc.start(program, args)
-        if not proc.waitForStarted(5000):
-            self._ssh_test_timeout_timer.stop()
-            err = proc.errorString()
-            debug_log(
-                "SSH",
-                "test_process_start_failed",
-                error=err,
-                target=job.display,
-            )
-            proc.deleteLater()
-            self._ssh_test_process = None
-            self._ssh_test_current = None
-            QMessageBox.critical(
-                self,
-                "SSH test",
-                f"Could not start ssh (or sshpass) for:\n{job.display}\n\n{err}",
-            )
-            self._append_log(f"SSH: start failed — {job.display} — {err}")
-            self._ssh_ok_this_session = False
-            self._ssh_test_abort_batch_state()
-            self._apply_idle_control_state_after_preflight_async()
-            self._sync_guide_pulse()
-
-    @Slot()
-    def _test_ssh(self) -> None:
-        if self._qprocess_ref_busy("_ssh_test_process"):
-            return
-        jobs = self._ssh_test_build_jobs()
-        if not jobs:
-            QMessageBox.information(
-                self,
-                "SSH test",
-                "SSH applies when the source or destination is user@host:/path.",
-            )
-            return
-
-        self._ssh_test_abort_batch_state()
-        self._ssh_test_queue = deque(jobs)
-
-        any_pw = bool(self._ssh_password_dest_plain())
-        for i in range(self._source_list.count()):
-            if self._source_password_for_row(i):
-                any_pw = True
-                break
-        if any_pw and not shutil.which("sshpass"):
-            self._append_log(
-                "Note: sshpass not found — per-row passwords use GUI prompts only. "
-                "Install: sudo pacman -S sshpass (Arch/CachyOS)."
-            )
-        if (
-            any_pw
-            and not shutil.which("sshpass")
-            and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-        ):
-            QMessageBox.warning(
-                self,
-                "SSH password prompt",
-                "Password is set but sshpass is missing and no DISPLAY/WAYLAND_DISPLAY — "
-                "the GUI password dialog may not appear.",
-            )
-
-        self._btn_ssh.setEnabled(False)
-        self._sync_guide_pulse()
-        self._ssh_test_dequeue_and_start()
-
-    @Slot()
-    def _on_ssh_test_timeout(self) -> None:
-        proc = self._ssh_test_process
-        if proc is None or proc.state() == QProcess.ProcessState.NotRunning:
-            return
-        self._ssh_test_timed_out = True
-        proc.kill()
-
-    @Slot(int, int)
-    def _on_ssh_test_process_finished(self, exit_code: int, _exit_status: int) -> None:
-        self._ssh_test_timeout_timer.stop()
-        proc = self._ssh_test_process
-        if proc is None:
-            return
-        self._ssh_test_process = None
-        timed_out = self._ssh_test_timed_out
-        self._ssh_test_timed_out = False
-        out = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
-        err_b = bytes(proc.readAllStandardError()).decode("utf-8", errors="replace")
-        proc.deleteLater()
-        if timed_out:
-            disp = (
-                self._ssh_test_current.display
-                if self._ssh_test_current is not None
-                else "SSH target"
-            )
-            debug_log(
-                "SSH",
-                "test_timed_out",
-                target=disp,
-                stderr_excerpt=err_b.strip()[:800],
-                stdout_excerpt=out.strip()[:400],
-            )
-            QMessageBox.warning(
-                self,
-                "SSH test",
-                "The SSH test timed out (network slow or server not responding) while "
-                f"connecting to:\n{disp}",
-            )
-            self._append_log(f"SSH: timed out — {disp}")
-            self._ssh_ok_this_session = False
-            self._ssh_test_abort_batch_state()
-        else:
-            debug_log(
-                "SSH",
-                "test_process_finished",
-                exit_code=exit_code,
-                target=(
-                    self._ssh_test_current.display
-                    if self._ssh_test_current is not None
-                    else None
-                ),
-            )
-            self._ssh_test_handle_process_exit(exit_code, out, err_b)
-        self._apply_idle_control_state_after_preflight_async()
-        self._sync_guide_pulse()
 
     def _dest_space_busy(self) -> bool:
         if self._qthread_ref_running("_space_thread"):
@@ -2372,6 +2319,7 @@ class MainWindow(QWidget):
             self._dest,
             self._ssh_password,
             self._btn_browse_dest,
+            self._btn_test_ssh_dest,
             self._timeout,
             self._retry,
             self._dry_run,
@@ -2381,23 +2329,19 @@ class MainWindow(QWidget):
             self._combo_existing_files,
             self._bwlimit,
             self._extra_rsync,
-            self._btn_ssh,
         ):
             w.setEnabled(enabled)
 
     def _get_guide_target(self) -> Optional[QPushButton]:
         """
-        Linear checklist: sources → destination → SSH (if any remote) → start.
+        Linear checklist: sources → destination → start.
         """
         if self._rsync.is_syncing():
             return None
         if self._dest_space_busy():
             return None
-        if self._qprocess_ref_busy("_ssh_test_process"):
-            return None
         paths = self._source_paths_list()
         dst = self._dest.text().strip()
-        dst_remote, _ = self._parsed_destination()
 
         if not paths:
             return self._btn_add_source
@@ -2409,9 +2353,6 @@ class MainWindow(QWidget):
 
         if not dst:
             return self._btn_browse_dest
-
-        if (self._ssh_source_is_remote() or dst_remote is not None) and not self._ssh_ok_this_session:
-            return self._btn_ssh
 
         return self._btn_start
 

@@ -99,7 +99,7 @@ def test_get_guide_target_browse_dest_when_dest_empty(
     w._source_list.clear()
     w._source_list.addItem(str(src) + "/")
     w._dest.clear()
-    assert w._get_guide_target() is w._btn_browse_dest
+    assert w._get_guide_target() is w._btn_edit_dest
 
 
 def test_get_guide_target_remote_source_goes_to_start_when_dest_set(

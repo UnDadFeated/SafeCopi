@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shlex
 import shutil
 import subprocess
@@ -357,13 +356,12 @@ class MainWindow(QWidget):
             "first when set; otherwise the source password."
         )
 
-        self._btn_browse_dest = QPushButton("Browse…")
-        self._btn_browse_dest.setToolTip(
-            "Choose a local destination folder. For remotes, type user@host:/path or paste "
-            "a Dolphin sftp:// or ssh:// URL (normalized for rsync). "
-            "user@host:/path in the field; choosing a folder here sets a local path instead."
+        self._btn_edit_dest = QPushButton("Browse…")
+        self._btn_edit_dest.setToolTip(
+            "Open a dialog to set a local or remote destination (with optional SSH password "
+            "and Test SSH), just like Add/Edit source."
         )
-        self._btn_browse_dest.clicked.connect(self._browse_destination)
+        self._btn_edit_dest.clicked.connect(self._prompt_edit_dest)
 
         self._btn_test_ssh_dest = QPushButton("Test SSH")
         self._btn_test_ssh_dest.setToolTip(
@@ -581,7 +579,7 @@ class MainWindow(QWidget):
         _dest_btns_col = QVBoxLayout()
         _dest_btns_col.setSpacing(7)
         _dest_btns_col.setContentsMargins(0, 0, 0, 0)
-        _dest_btns_col.addWidget(self._btn_browse_dest, 0, Qt.AlignmentFlag.AlignTop)
+        _dest_btns_col.addWidget(self._btn_edit_dest, 0, Qt.AlignmentFlag.AlignTop)
         _dest_btns_col.addWidget(self._btn_test_ssh_dest, 0, Qt.AlignmentFlag.AlignTop)
         _dest_btns_col.addStretch(1)
         _dest_btns_wrap = QWidget()
@@ -1128,7 +1126,7 @@ class MainWindow(QWidget):
             self._btn_add_source,
             self._btn_edit_source,
             self._btn_remove_source,
-            self._btn_browse_dest,
+            self._btn_edit_dest,
             self._btn_test_ssh_dest,
         )
         h = _PATHS_SIDE_BTN_MIN_H
@@ -1171,12 +1169,16 @@ class MainWindow(QWidget):
                 "SSH_ASKPASS": str(w),
                 "SSH_ASKPASS_REQUIRE": "force",
             }
+        # Derive batch_mode from the dialog's own context: if a password was
+        # supplied we need password/kbd-interactive auth (batch_mode=False);
+        # otherwise allow key-based batch mode.
+        batch = not bool(pw_plain)
         try:
             cp = run_ssh_command(
                 rmt,
                 "echo ok",
                 connect_timeout=SSH_TEST_CONNECT_TIMEOUT_SEC,
-                batch_mode=self._ssh_batch_mode(),
+                batch_mode=batch,
                 extra_env=extra_env,
                 password_for_sshpass=pw_ssh,
             )
@@ -1889,14 +1891,149 @@ class MainWindow(QWidget):
         self._on_sources_mutation()
 
     @Slot()
-    def _browse_destination(self) -> None:
-        start = self._dest.text().strip()
-        remote, _ = parse_rsync_destination(start)
-        if remote is not None:
-            start = str(Path.home())
-        d = QFileDialog.getExistingDirectory(self, "Select destination directory", start)
-        if d:
-            self._dest.setText(d if d.endswith("/") else d + "/")
+    def _prompt_edit_dest(self) -> None:
+        """Open a dialog (matching the source dialog) to set the destination path + password."""
+        init_path = self._dest.text().strip()
+        init_pw = self._ssh_password.text().strip()
+        res = self._run_dest_path_dialog(
+            title="Edit destination",
+            initial_path=init_path,
+            initial_pw=init_pw,
+        )
+        if res is None:
+            return
+        norm, pw = res
+        self._dest.setText(norm)
+        self._ssh_password.setText(pw)
+
+    def _run_dest_path_dialog(
+        self,
+        *,
+        title: str,
+        initial_path: str,
+        initial_pw: str,
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Destination path dialog (local or remote). Returns ``(normalized_path, password_plain)``
+        or ``None`` if cancelled or validation failed after OK.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumWidth(420)
+        v = QVBoxLayout(dlg)
+        rb_local = QRadioButton("Local folder")
+        rb_remote = QRadioButton("Remote (SSH / SFTP)")
+        bg = QButtonGroup(dlg)
+        bg.addButton(rb_local)
+        bg.addButton(rb_remote)
+        init = initial_path.strip()
+        remote_initial, _ = parse_rsync_destination(init) if init else (None, "")
+        if init and remote_initial is not None:
+            rb_remote.setChecked(True)
+        else:
+            rb_local.setChecked(True)
+        row_kind = QHBoxLayout()
+        row_kind.addWidget(rb_local)
+        row_kind.addWidget(rb_remote)
+        row_kind.addStretch(1)
+        v.addLayout(row_kind)
+        le_path = QLineEdit()
+        le_path.setMinimumHeight(28)
+        le_path.setPlaceholderText("e.g. /mnt/backups/Archive/ or user@host:/mnt/backup/")
+        le_pw = QLineEdit()
+        le_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        le_pw.setPlaceholderText("SSH password if needed (not saved)")
+        le_pw.setMinimumHeight(28)
+        le_pw.setText(initial_pw)
+        btn_test_ssh = QPushButton("Test SSH connection…")
+        btn_test_ssh.setMinimumHeight(28)
+        btn_test_ssh.setToolTip(
+            "Run echo ok on the remote host using the path and password above "
+            "(same as sync: keys, sshpass, or SSH_ASKPASS)."
+        )
+        pw_wrap = QWidget()
+        pw_h = QHBoxLayout(pw_wrap)
+        pw_h.setContentsMargins(0, 0, 0, 0)
+        pw_h.setSpacing(8)
+        pw_h.addWidget(le_pw, 1)
+        pw_h.addWidget(btn_test_ssh, 0)
+        btn_browse = QPushButton("Browse…")
+        btn_browse.setMinimumHeight(28)
+        path_row = QHBoxLayout()
+        path_row.addWidget(le_path, 1)
+        path_row.addWidget(btn_browse, 0)
+        v.addLayout(path_row)
+        v.addWidget(pw_wrap)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        v.addWidget(bb)
+        le_path.setText(init)
+
+        def sync_mode() -> None:
+            loc = rb_local.isChecked()
+            btn_browse.setVisible(loc)
+            pw_wrap.setVisible(not loc)
+            if loc:
+                le_path.setPlaceholderText("e.g. /mnt/backups/Archive/")
+            else:
+                le_path.setPlaceholderText("e.g. user@host:/mnt/backup/ or paste sftp://…")
+
+        def browse_local() -> None:
+            start = le_path.text().strip()
+            remote, _ = parse_rsync_destination(start)
+            if remote is not None:
+                start = str(Path.home())
+            pick = start or str(Path.home())
+            d = QFileDialog.getExistingDirectory(dlg, "Select destination directory", pick)
+            if d:
+                le_path.setText(d if d.endswith("/") else d + "/")
+
+        rb_local.toggled.connect(lambda _c: sync_mode())
+        rb_remote.toggled.connect(lambda _c: sync_mode())
+        btn_browse.clicked.connect(browse_local)
+        btn_test_ssh.clicked.connect(
+            lambda: self._dialog_test_remote_ssh(
+                dlg,
+                le_path.text(),
+                le_pw.text(),
+                hint_row=None,
+            )
+        )
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        sync_mode()
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        raw = le_path.text().strip()
+        if not raw:
+            QMessageBox.warning(self, title, "Enter a destination path.")
+            return None
+
+        if rb_local.isChecked():
+            remote, _ = parse_rsync_destination(raw)
+            if remote is not None:
+                QMessageBox.warning(
+                    self,
+                    title,
+                    "That looks like a remote path. Choose \"Remote (SSH / SFTP)\" instead.",
+                )
+                return None
+            norm = raw if raw.endswith("/") else raw + "/"
+            return (norm, "")
+        norm = canonical_rsync_path(raw)
+        remote, _ = parse_rsync_destination(norm)
+        if remote is None:
+            QMessageBox.warning(
+                self,
+                title,
+                "Remote path not recognized. Use user@host:/path or sftp://user@host/path.",
+            )
+            return None
+        pw = le_pw.text().strip()
+        return (norm, pw)
 
     @Slot()
     def _test_ssh_destination(self) -> None:
@@ -2318,7 +2455,7 @@ class MainWindow(QWidget):
             self._btn_remove_source,
             self._dest,
             self._ssh_password,
-            self._btn_browse_dest,
+            self._btn_edit_dest,
             self._btn_test_ssh_dest,
             self._timeout,
             self._retry,
@@ -2352,7 +2489,7 @@ class MainWindow(QWidget):
                     return self._btn_add_source
 
         if not dst:
-            return self._btn_browse_dest
+            return self._btn_edit_dest
 
         return self._btn_start
 

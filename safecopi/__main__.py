@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-
 
 def main() -> int:
     from safecopi.main_window import run_app

@@ -20,6 +20,7 @@ from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 _ASKPASS_WRAPPER: Optional[Path] = None
+_RSYNC_CRTIMES_SUPPORTED: Optional[bool] = None
 
 # Upper bounds for user-supplied rsync knobs (match UI where applicable; clamp API callers too).
 RSYNC_TIMEOUT_SEC_MAX: int = 86400
@@ -827,6 +828,36 @@ def ensure_local_rsync_receiver_temp_dir(dest: str) -> None:
         pass
 
 
+def rsync_supports_crtimes() -> bool:
+    """Return True if the local rsync binary was compiled with ``--crtimes`` (``-N``) support.
+
+    The result is cached after the first probe.  Returns False when rsync is missing or its
+    capabilities line contains ``no crtimes``.
+    """
+    global _RSYNC_CRTIMES_SUPPORTED
+    if _RSYNC_CRTIMES_SUPPORTED is not None:
+        return _RSYNC_CRTIMES_SUPPORTED
+    try:
+        proc = subprocess.run(
+            ["rsync", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        # rsync prints "no crtimes" when compiled without support; bare "crtimes" when supported.
+        out = proc.stdout or ""
+        if "no crtimes" in out:
+            _RSYNC_CRTIMES_SUPPORTED = False
+        elif "crtimes" in out:
+            _RSYNC_CRTIMES_SUPPORTED = True
+        else:
+            _RSYNC_CRTIMES_SUPPORTED = False
+    except (OSError, subprocess.TimeoutExpired):
+        _RSYNC_CRTIMES_SUPPORTED = False
+    return _RSYNC_CRTIMES_SUPPORTED
+
+
 def build_rsync_command_argv(
     source: str,
     dest: str,
@@ -842,6 +873,9 @@ def build_rsync_command_argv(
     descends into subdirectories. When false, uses ``-hlptgoD`` — same archive
     preserves without ``-r`` — so only the top level of the source tree is
     traversed.
+
+    **Timestamp preservation**: ``-a`` includes ``-t`` (modification times). When the
+    local rsync supports ``--crtimes`` (``-N``), creation / birth times are preserved too.
 
     ``extra_args`` are inserted before ``-v`` and the source/destination paths.
 
@@ -870,6 +904,10 @@ def build_rsync_command_argv(
         "--info=progress2",
         "--mkpath",
     ]
+    # Preserve creation times (birth times) when the local rsync supports --crtimes.
+    # Modification times are already preserved via -a (-t); -N is not part of archive mode.
+    if rsync_supports_crtimes():
+        out.append("--crtimes")
     # Shallow temp dir: avoids receiver mkstemp in deep paths (ENOENT on some NAS/CIFS).
     # Local: under dest (same FS as backup); remote receiver: /tmp always exists (rsync 3.4+).
     ds = dest.strip()

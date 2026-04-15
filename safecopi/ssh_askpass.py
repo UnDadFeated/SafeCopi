@@ -12,7 +12,7 @@ def main() -> int:
     except ImportError:
         return 1
 
-    app = QApplication(["safecopi-ssh-askpass"])
+    _app = QApplication(["safecopi-ssh-askpass"])  # noqa: F841  # must exist for QInputDialog
     prompt = sys.argv[1] if len(sys.argv) > 1 else "Password:"
     text, ok = QInputDialog.getText(
         None,

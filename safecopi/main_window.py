@@ -276,6 +276,7 @@ class MainWindow(QWidget):
 
         self._source_list = QListWidget()
         self._source_list.setObjectName("SourceList")
+        self._source_list.setAlternatingRowColors(False)
         self._source_list.setMinimumHeight(40)
         self._source_list.setMaximumHeight(62)
         self._source_list.setIconSize(QSize(_SSH_HINT_ICON_PX, _SSH_HINT_ICON_PX))
@@ -308,7 +309,7 @@ class MainWindow(QWidget):
         self._btn_edit_source.clicked.connect(self._prompt_edit_source)
         self._btn_remove_source.clicked.connect(self._remove_source_folder)
 
-        self._dest = QLineEdit("htpc@192.168.4.112:/mnt/media_hdd/Backup/Archive/")
+        self._dest = QLineEdit()
         self._dest.setObjectName("PathLineEdit")
         self._dest.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._dest.setMinimumHeight(22)
@@ -1355,8 +1356,6 @@ class MainWindow(QWidget):
             legacy = s.value("source", "", type=str).strip()
             if legacy:
                 paths = [legacy]
-            else:
-                paths = ["/mnt/nas/Archive/"]
         if len(paths) > _MAX_SOURCE_FOLDERS:
             paths = paths[:_MAX_SOURCE_FOLDERS]
         for p in paths:

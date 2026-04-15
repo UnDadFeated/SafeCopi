@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.1.5] - 2026-04-14
+
+### Fixed
+
+- **SSH test (destination/source dialogs)**: SSH test now derives `batch_mode` from the dialog password context (password entered => interactive auth allowed), instead of main-window remote-state. This fixes false failures when testing a remote path from the destination dialog before applying it to the main form.
+
+### Changed
+
+- **Fresh-start defaults**: Removed hardcoded destination seed path and removed fallback auto-seeded source entry. New installs now start with empty path fields using placeholders, while existing users still load saved settings from `QSettings`.
+
+## [2.1.4] - 2026-04-14
+
+### Added
+
+- **Destination dialog**: Added destination pop-up workflow matching source Add/Edit behavior, including local/remote mode, remote password input, and `Test SSH connection…` inside the dialog.
+
+### Changed
+
+- **Destination actions**: Replaced the old local-only destination browse action with the dialog-based **Browse…** button (single destination still enforced).
+
 ## [2.1.3] - 2026-04-10
 
 ### Changed

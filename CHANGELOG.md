@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.6] - 2026-04-15
+
+### Fixed
+
+- **Progress bar skipping updates**: Resolved an issue where the overall progress bar would stall at low values when resuming or retrying a sync that was rapidly skipping already-transferred files. The UI now actively enforces monotonic progression by incorporating skip queue stats even if some sparse byte progress has occurred, making skipped proportions visually clear.
+
 ## [2.1.5] - 2026-04-14
 
 ### Fixed

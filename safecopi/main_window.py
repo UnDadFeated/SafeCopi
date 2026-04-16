@@ -1618,9 +1618,7 @@ class MainWindow(QWidget):
         to 0 when switching sources so each segment is visible; a monotonic peak applies only within
         the current source.
         """
-        pct_u = min(10_000, max(0, snap.percent * 100))
-        q_u = self._queue_based_bar_hundredths(snap)
-        return min(10_000, max(pct_u, q_u))
+        return min(10_000, max(0, snap.percent * 100))
 
     @staticmethod
     def _compact_path_for_elapsed_label(raw: str, max_len: int = 76) -> str:
@@ -1730,9 +1728,13 @@ class MainWindow(QWidget):
             eta_disp = "finishing…"
 
         raw_u = self._sync_transfer_bar_units(snap)
-        self._sync_bar_peak = max(self._sync_bar_peak, raw_u)
-        self._progress.setValue(self._sync_bar_peak)
-        pct_bar = min(100.0, self._sync_bar_peak / 100.0)
+        q_u = self._queue_based_bar_hundredths(snap)
+        self._sync_bar_peak = max(self._sync_bar_peak, raw_u, min(9900, q_u))
+        
+        display_u = self._sync_bar_peak
+
+        self._progress.setValue(display_u)
+        pct_bar = min(100.0, display_u / 100.0)
         self._progress.setFormat(f"{pct_bar:.2f}\u0025")
 
         if total_for_size is not None and tb is not None:
@@ -2684,6 +2686,11 @@ class MainWindow(QWidget):
             self._sync_carry_tb = None
             self._sync_left_monotone_tb = None
             self._sync_left_monotone_display = None
+            self._sync_bar_peak = 0
+            self._pending_sync_snap = None
+            if self._progress.maximum() == 10_000:
+                self._progress.setValue(0)
+                self._progress.setFormat("0.00\u0025")
         debug_log("SYNC", "ui_attempt_changed", attempt=n)
         self._append_log(f"--- Attempt {n} ---")
         self._btn_pause.setText("Pause")

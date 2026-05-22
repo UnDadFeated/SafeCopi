@@ -319,7 +319,7 @@ class MainWindow(QWidget):
         )
         self._timeout = QSpinBox()
         self._timeout.setRange(10, 86400)
-        self._timeout.setValue(60)
+        self._timeout.setValue(300)
         self._timeout.setSuffix(" s")
         self._retry = QSpinBox()
         self._retry.setRange(5, 3600)
@@ -1372,9 +1372,11 @@ class MainWindow(QWidget):
             s = QSettings("SafeCopi", "SafeCopi")
             self._load_source_list_from_settings(s)
             self._dest.setText(s.value("dest", self._dest.text(), type=str))
-            self._timeout.setValue(
-                self._settings_int(s, "io_timeout", self._timeout.value(), 10, 86400)
-            )
+            saved_timeout = self._settings_int(s, "io_timeout", self._timeout.value(), 10, 86400)
+            # Migrate old default of 60s which caused chronic exit-code-30 on large trees.
+            if saved_timeout == 60:
+                saved_timeout = 300
+            self._timeout.setValue(saved_timeout)
             self._retry.setValue(
                 self._settings_int(s, "retry_delay", self._retry.value(), 5, 3600)
             )
@@ -2702,6 +2704,16 @@ class MainWindow(QWidget):
         debug_log("SYNC", "pause_state_changed", paused=paused)
         self._btn_pause.setText("Resume" if paused else "Pause")
 
+    def _show_sync_message(self, icon: QMessageBox.Icon, title: str, text: str) -> None:
+        """Show a non-blocking sync result dialog and log close timing."""
+        debug_log("SYNC", "result_dialog_open", title=title)
+        box = QMessageBox(icon, title, text, QMessageBox.StandardButton.Ok, self)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        box.finished.connect(
+            lambda _code, t=title: debug_log("SYNC", "result_dialog_closed", title=t)
+        )
+        box.open()
+
     @Slot(int, bool)
     def _on_sync_finished(self, code: int, ok: bool) -> None:
         debug_log("SYNC", "finished", exit_code=code, success=ok)
@@ -2727,13 +2739,17 @@ class MainWindow(QWidget):
             self._lbl_sync_path.setToolTip("")
             if was_dry:
                 tail = "\n".join(self._log.toPlainText().splitlines()[-40:])
-                QMessageBox.information(
-                    self,
+                self._show_sync_message(
+                    QMessageBox.Icon.Information,
                     "Dry run finished",
                     f"Exit code: {code}\n\nLast log lines:\n{tail}",
                 )
             else:
-                QMessageBox.information(self, "Sync", "Backup completed successfully.")
+                self._show_sync_message(
+                    QMessageBox.Icon.Information,
+                    "Sync",
+                    "Backup completed successfully.",
+                )
         else:
             self._sync_progress_timer.stop()
             self._stop_sync_session_wall_clock(reset_label=False)
@@ -2747,7 +2763,11 @@ class MainWindow(QWidget):
             self._lbl_sync_path.setText("")
             self._lbl_sync_path.setToolTip("")
             if code != 0:
-                QMessageBox.warning(self, "Sync", f"Sync did not complete successfully (code {code}).")
+                self._show_sync_message(
+                    QMessageBox.Icon.Warning,
+                    "Sync",
+                    f"Sync did not complete successfully (code {code}).",
+                )
 
     @Slot()
     def _on_stopped(self) -> None:

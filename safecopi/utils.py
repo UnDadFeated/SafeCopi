@@ -241,7 +241,11 @@ def ssh_extra_argv(
     for ``rsync -e``, so encrypted keys can still use the agent or askpass without
     being blocked on the rsync transport.
     """
-    opts: List[str] = ["-o", f"ConnectTimeout={connect_timeout}"]
+    opts: List[str] = [
+        "-o", f"ConnectTimeout={connect_timeout}",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+    ]
     if batch_mode:
         if not for_rsync:
             opts += ["-o", "BatchMode=yes"]
@@ -913,11 +917,13 @@ def build_rsync_command_argv(
     ds = dest.strip()
     if ds:
         rem, _ = parse_rsync_destination(ds)
-        if rem is not None:
-            out.append("--temp-dir=/tmp")
-        else:
+        if rem is None:
+            # Local: Shallow temp dir to avoid receiver mkstemp in deep paths (ENOENT on some NAS/CIFS)
             out.append(f"--temp-dir={RSYNC_RECEIVER_TEMP_SUBDIR}")
             out.append(f"--filter=protect {RSYNC_RECEIVER_TEMP_SUBDIR}/")
+        # For remote targets, omit --temp-dir entirely. Rsync will default to writing temporary
+        # files directly within the destination directory on the remote host. This cleanly solves
+        # the "No space left on device" error bypassing small /tmp RAM disks.
     out.append(f"--timeout={t}")
     out.extend(extra_args)
     out.extend(["-v", source, dest])

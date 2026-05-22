@@ -173,7 +173,7 @@ def test_build_rsync_command_argv_order() -> None:
     assert argv[0] == "rsync"
     assert "-ah" in argv
     assert "--no-inc-recursive" in argv
-    assert "--temp-dir=/tmp" in argv
+    assert "--temp-dir=/tmp" not in argv
     assert f"--temp-dir={RSYNC_RECEIVER_TEMP_SUBDIR}" not in argv
     assert "--timeout=30" in argv
     assert "--dry-run" in argv

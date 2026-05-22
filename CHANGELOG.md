@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0] - 2026-05-22
+
+### Fixed
+
+- **rsync --temp-dir unit test**: Updated unit test suite assertions to match correct `--temp-dir` bypass logic for remote destinations (which solves chronic "No space left on device" errors on small remote `/tmp` RAM disks).
+
+### Changed
+
+- **Fresh timeouts**: Raised default timeout from 60 seconds to 300 seconds to prevent exit code 30 timeouts on extremely large directory trees.
+- **SSH keep-alives**: Configured `ServerAliveInterval=30` and `ServerAliveCountMax=3` options for rsync's SSH transport to prevent connection drops on sluggish or quiet routes.
+- **Non-blocking Qt Dialogs**: Migrated sync result and error message dialogs to a non-blocking `QMessageBox.open()` flow to prevent UI freezing and improve unit-test execution stability.
+
 ## [2.1.6] - 2026-04-15
 
 ### Fixed

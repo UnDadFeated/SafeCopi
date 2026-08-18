@@ -98,7 +98,7 @@ or:
 
 ## Releases
 
-- Current release: `2.2.0`
+- Current release: `2.2.1`
 - Version source: [`safecopi/__init__.py`](safecopi/__init__.py)
 - Full history: [`CHANGELOG.md`](CHANGELOG.md)
 - Version bumps for this repo are applied only when the maintainer requests a release (e.g. by saying **push update**); routine work does not change the tagged version by default.

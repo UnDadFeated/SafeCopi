@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.2.1] - 2026-08-17
+
+### Changed
+
+- **Release verification**: No functional changes since 2.2.0. Verified on a clean tree: 59/59 unit tests passing, offscreen GUI launch smoke test clean.
+
 ## [2.2.0] - 2026-05-22
 
 ### Fixed
